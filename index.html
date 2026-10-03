@@ -3,13 +3,28 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%23E11D48'/><path d='M30 50h40M50 30v40' stroke='white' stroke-width='12' stroke-linecap='square'/></svg>" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#09090b" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f8f9fa" media="(prefers-color-scheme: light)">
     <title>TRANSLATION TRAINING // 瑞士风格考研英语翻译竞技场</title>
+    <script>
+      (function() {
+        try {
+          var theme = localStorage.getItem('tt_theme');
+          var supportDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+          if (theme === 'dark' || (!theme && supportDark)) {
+            document.documentElement.classList.add('dark');
+          } else {
+            document.documentElement.classList.remove('dark');
+          }
+        } catch (e) {}
+      })();
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   </head>
-  <body class="bg-swiss-paper text-swiss-black font-sans antialiased selection:bg-swiss-red selection:text-white min-h-screen">
+  <body class="bg-swiss-paper dark:bg-swiss-paper-dark text-swiss-black dark:text-zinc-100 font-sans antialiased selection:bg-swiss-red selection:text-white min-h-screen transition-colors duration-150">
     <div id="root"></div>
     <script type="module" src="/src/client/main.tsx"></script>
   </body>
