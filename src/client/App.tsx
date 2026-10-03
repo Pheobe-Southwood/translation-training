@@ -1,0 +1,229 @@
+import React, { useState, useEffect } from 'react';
+import type { AuthUser, PvpRoomState } from '../shared/types.js';
+import { SwissHeader } from './components/SwissHeader.js';
+import { PasswordGate } from './components/PasswordGate.js';
+import { HomeView } from './views/HomeView.js';
+import { SoloView } from './views/SoloView.js';
+import { PvpLobbyView } from './views/PvpLobbyView.js';
+import { PvpMatchView } from './views/PvpMatchView.js';
+import { HistoryView } from './views/HistoryView.js';
+import {
+  getAuthToken,
+  removeAuthToken,
+  getStoredUser,
+  setStoredUser,
+  getPlayerNickname,
+  setPlayerNickname,
+} from './utils/storage.js';
+
+export const App: React.FC = () => {
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(() => getStoredUser());
+  const [currentView, setCurrentView] = useState<'home' | 'solo' | 'pvp-lobby' | 'pvp-match' | 'history'>('home');
+  const [selectedYear, setSelectedYear] = useState<number>(2024);
+  const [nickname, setNickname] = useState<string>(() => getPlayerNickname());
+
+  // Player ID is tied to authenticated user ID for 100% online persistence
+  const playerId = currentUser?.id || 'guest';
+
+  // PVP Active State
+  const [pvpState, setPvpState] = useState<{
+    roomState: PvpRoomState;
+    ws: WebSocket;
+  } | null>(null);
+  const [initialRoomCode, setInitialRoomCode] = useState<string | undefined>();
+
+  // Check auth on mount
+  useEffect(() => {
+    checkAuth();
+    parseHashRoute();
+    window.addEventListener('hashchange', parseHashRoute);
+    return () => window.removeEventListener('hashchange', parseHashRoute);
+  }, []);
+
+  const parseHashRoute = () => {
+    const hash = window.location.hash;
+    const match = hash.match(/#\/pvp\/([A-Za-z0-9]+)/);
+    if (match && match[1]) {
+      setInitialRoomCode(match[1].toUpperCase());
+      setCurrentView('pvp-lobby');
+    }
+  };
+
+  const checkAuth = async () => {
+    const token = getAuthToken();
+    if (!token) {
+      setIsAuthenticated(false);
+      return;
+    }
+    try {
+      const res = await fetch('/api/auth/check', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.user) {
+          setCurrentUser(data.user);
+          setNickname(data.user.nickname);
+          setStoredUser(data.user);
+        }
+        setIsAuthenticated(true);
+      } else {
+        removeAuthToken();
+        setCurrentUser(null);
+        setIsAuthenticated(false);
+      }
+    } catch {
+      // In case server is temporarily restarting, keep session if token exists
+      setIsAuthenticated(true);
+    }
+  };
+
+  const handleAuthSuccess = (user: AuthUser) => {
+    setCurrentUser(user);
+    setNickname(user.nickname);
+    setStoredUser(user);
+    setIsAuthenticated(true);
+  };
+
+  const handleLogout = () => {
+    removeAuthToken();
+    setCurrentUser(null);
+    setIsAuthenticated(false);
+  };
+
+  const handleChangeNickname = async () => {
+    const next = prompt('请输入新的对战与练习昵称：', nickname);
+    if (next && next.trim()) {
+      const trimmed = next.trim().slice(0, 20);
+      setNickname(trimmed);
+      setPlayerNickname(trimmed);
+
+      // Persist to server database
+      try {
+        const token = getAuthToken();
+        const res = await fetch('/api/user/nickname', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ nickname: trimmed }),
+        });
+        if (res.ok && currentUser) {
+          const updatedUser = { ...currentUser, nickname: trimmed };
+          setCurrentUser(updatedUser);
+          setStoredUser(updatedUser);
+        }
+      } catch (err) {
+        console.error('Failed to update nickname online:', err);
+      }
+    }
+  };
+
+  const handleStartSolo = (year: number) => {
+    setSelectedYear(year);
+    setCurrentView('solo');
+  };
+
+  const handleEnterPvpLobby = (year: number) => {
+    setSelectedYear(year);
+    setInitialRoomCode(undefined);
+    setCurrentView('pvp-lobby');
+  };
+
+  const handleStartMatch = (roomState: PvpRoomState, ws: WebSocket) => {
+    setPvpState({ roomState, ws });
+    setCurrentView('pvp-match');
+  };
+
+  const handleExitMatch = () => {
+    if (pvpState?.ws) {
+      pvpState.ws.close();
+    }
+    setPvpState(null);
+    setCurrentView('home');
+  };
+
+  if (isAuthenticated === null) {
+    return (
+      <div className="min-h-screen flex items-center justify-center font-mono text-xs text-zinc-500">
+        加载凭据中...
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen flex flex-col bg-swiss-paper text-swiss-black font-sans swiss-grid-bg">
+      {!isAuthenticated && (
+        <PasswordGate onSuccess={handleAuthSuccess} />
+      )}
+
+      {currentView !== 'pvp-match' && (
+        <SwissHeader
+          currentView={currentView}
+          onNavigate={(view) => setCurrentView(view)}
+          nickname={nickname}
+          username={currentUser?.username}
+          onChangeNickname={handleChangeNickname}
+          onLogout={handleLogout}
+        />
+      )}
+
+      <main className="flex-1">
+        {currentView === 'home' && (
+          <HomeView
+            onStartSolo={handleStartSolo}
+            onEnterPvpLobby={handleEnterPvpLobby}
+            onViewHistory={() => setCurrentView('history')}
+          />
+        )}
+
+        {currentView === 'solo' && (
+          <SoloView year={selectedYear} onBack={() => setCurrentView('home')} />
+        )}
+
+        {currentView === 'pvp-lobby' && (
+          <PvpLobbyView
+            initialYear={selectedYear}
+            playerId={playerId}
+            nickname={nickname}
+            initialRoomCode={initialRoomCode}
+            onBack={() => setCurrentView('home')}
+            onStartMatch={handleStartMatch}
+          />
+        )}
+
+        {currentView === 'pvp-match' && pvpState && (
+          <PvpMatchView
+            initialRoomState={pvpState.roomState}
+            ws={pvpState.ws}
+            playerId={playerId}
+            onExit={handleExitMatch}
+          />
+        )}
+
+        {currentView === 'history' && (
+          <HistoryView onBack={() => setCurrentView('home')} />
+        )}
+      </main>
+
+      {/* Swiss Minimalist Footer */}
+      {currentView !== 'pvp-match' && (
+        <footer className="border-t-2 border-swiss-black bg-white py-6 mt-16 font-mono text-xs text-zinc-500">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 bg-swiss-red"></span>
+              <span className="font-bold text-swiss-black uppercase">
+                TRANSLATION TRAINING // 2002–2026
+              </span>
+            </div>
+            <div>
+              SWISS DESIGN SYSTEM · DEEPSEEK HIGH REASONING · PVP ARENA
+            </div>
+          </div>
+        </footer>
+      )}
+    </div>
+  );
+};
