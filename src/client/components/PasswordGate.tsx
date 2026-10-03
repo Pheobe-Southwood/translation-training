@@ -124,19 +124,19 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-swiss-black/75 backdrop-blur-sm p-4">
-      <div className="w-full max-w-md bg-white border-2 border-swiss-black shadow-[8px_8px_0px_0px_#09090b] p-6 sm:p-8">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-swiss-black/80 dark:bg-black/85 backdrop-blur-sm p-4 transition-colors duration-150">
+      <div className="w-full max-w-md bg-white dark:bg-zinc-900 border-2 border-swiss-black dark:border-zinc-700 shadow-[6px_6px_0px_0px_#09090b] dark:shadow-[6px_6px_0px_0px_#000000] p-6 sm:p-8">
         {/* Top Header */}
-        <div className="flex items-center justify-between pb-4 border-b-2 border-swiss-black mb-5">
+        <div className="flex items-center justify-between pb-4 border-b-2 border-swiss-black dark:border-zinc-700 mb-5">
           <div className="flex items-center gap-2">
             <div className="w-6 h-6 bg-swiss-red text-white flex items-center justify-center font-bold text-sm">
               +
             </div>
-            <span className="font-mono text-xs uppercase tracking-widest font-bold">
+            <span className="font-mono text-xs uppercase tracking-widest font-bold text-swiss-black dark:text-zinc-100">
               AUTH GATE // 账号通行证
             </span>
           </div>
-          <span className="px-2 py-0.5 bg-zinc-100 border border-zinc-300 font-mono text-[10px] text-zinc-600">
+          <span className="px-2 py-0.5 bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 font-mono text-[10px] text-zinc-600 dark:text-zinc-400">
             PORT:8888
           </span>
         </div>
@@ -152,8 +152,8 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
             }}
             className={`py-2 text-center font-bold border transition-colors ${
               mode === 'login'
-                ? 'bg-swiss-black text-white border-swiss-black'
-                : 'bg-zinc-50 text-zinc-600 border-zinc-300 hover:border-swiss-black'
+                ? 'bg-swiss-black dark:bg-zinc-100 text-white dark:text-swiss-black border-swiss-black dark:border-zinc-100'
+                : 'bg-zinc-50 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border-zinc-300 dark:border-zinc-700 hover:border-swiss-black dark:hover:border-zinc-500'
             }`}
           >
             账号登录
@@ -166,8 +166,8 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
             }}
             className={`py-2 text-center font-bold border transition-colors ${
               mode === 'register'
-                ? 'bg-swiss-black text-white border-swiss-black'
-                : 'bg-zinc-50 text-zinc-600 border-zinc-300 hover:border-swiss-black'
+                ? 'bg-swiss-black dark:bg-zinc-100 text-white dark:text-swiss-black border-swiss-black dark:border-zinc-100'
+                : 'bg-zinc-50 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 border-zinc-300 dark:border-zinc-700 hover:border-swiss-black dark:hover:border-zinc-500'
             }`}
           >
             注册新账号
@@ -176,8 +176,8 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
 
         {/* Auto-Jump Notice Banner */}
         {infoMessage && (
-          <div className="mb-4 p-3 bg-amber-50 border border-amber-300 text-amber-900 text-xs font-mono flex items-start gap-2">
-            <Sparkles className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+          <div className="mb-4 p-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs font-mono flex items-start gap-2">
+            <Sparkles className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
             <span className="leading-relaxed">{infoMessage}</span>
           </div>
         )}
@@ -186,7 +186,7 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
         {mode === 'login' ? (
           <form onSubmit={handleLoginSubmit} className="space-y-4">
             <div>
-              <label className="block text-xs font-mono font-bold uppercase mb-1 text-zinc-700">
+              <label className="block text-xs font-mono font-bold uppercase mb-1 text-zinc-700 dark:text-zinc-300">
                 账号 (USERNAME)
               </label>
               <div className="relative">
@@ -197,16 +197,16 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
                   onChange={(e) => setUsername(e.target.value)}
                   placeholder="请输入您的账号"
                   autoFocus
-                  className="w-full border-2 border-swiss-black px-3 py-2 font-mono text-sm focus:outline-none focus:bg-zinc-50 transition-colors placeholder:text-zinc-400"
+                  className="w-full border-2 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-800 text-swiss-black dark:text-zinc-100 px-3 py-2 font-mono text-base sm:text-sm focus:outline-none focus:bg-zinc-50 dark:focus:bg-zinc-700/60 transition-colors placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
                 />
-                <div className="absolute right-3 top-2.5 text-zinc-400">
+                <div className="absolute right-3 top-2.5 text-zinc-400 dark:text-zinc-500">
                   <User className="w-4 h-4" />
                 </div>
               </div>
             </div>
 
             <div>
-              <label className="block text-xs font-mono font-bold uppercase mb-1 text-zinc-700">
+              <label className="block text-xs font-mono font-bold uppercase mb-1 text-zinc-700 dark:text-zinc-300">
                 密码 (PASSWORD)
               </label>
               <div className="relative">
@@ -215,16 +215,16 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="请输入密码"
-                  className="w-full border-2 border-swiss-black px-3 py-2 font-mono text-sm focus:outline-none focus:bg-zinc-50 transition-colors placeholder:text-zinc-400"
+                  className="w-full border-2 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-800 text-swiss-black dark:text-zinc-100 px-3 py-2 font-mono text-base sm:text-sm focus:outline-none focus:bg-zinc-50 dark:focus:bg-zinc-700/60 transition-colors placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
                 />
-                <div className="absolute right-3 top-2.5 text-zinc-400">
+                <div className="absolute right-3 top-2.5 text-zinc-400 dark:text-zinc-500">
                   <Lock className="w-4 h-4" />
                 </div>
               </div>
             </div>
 
             {error && (
-              <div className="p-3 bg-red-50 border border-red-300 text-red-700 text-xs font-mono">
+              <div className="p-3 bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-900 text-red-700 dark:text-red-300 text-xs font-mono">
                 [ERROR] {error}
               </div>
             )}
@@ -232,7 +232,7 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3 bg-swiss-black hover:bg-swiss-red text-white font-mono text-xs font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+              className="w-full min-h-[44px] py-3 bg-swiss-black hover:bg-swiss-red dark:bg-zinc-100 dark:text-swiss-black dark:hover:bg-swiss-red dark:hover:text-white text-white font-mono text-xs font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-2 disabled:opacity-50 active:scale-[0.99]"
             >
               {loading ? (
                 <span>正在验证登录...</span>
@@ -243,14 +243,14 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
                 </>
               )}
             </button>
-            <p className="text-[11px] font-mono text-zinc-400 text-center">
+            <p className="text-[11px] font-mono text-zinc-400 dark:text-zinc-500 text-center">
               * 若输入未注册账号，系统将自动跳转至注册并保留输入
             </p>
           </form>
         ) : (
           <form onSubmit={handleRegisterSubmit} className="space-y-3.5">
             <div>
-              <label className="block text-xs font-mono font-bold uppercase mb-1 text-zinc-700">
+              <label className="block text-xs font-mono font-bold uppercase mb-1 text-zinc-700 dark:text-zinc-300">
                 账号 (USERNAME)
               </label>
               <input
@@ -258,12 +258,12 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 placeholder="设置账号 (2-24字符)"
-                className="w-full border-2 border-swiss-black px-3 py-2 font-mono text-sm focus:outline-none focus:bg-zinc-50 transition-colors placeholder:text-zinc-400"
+                className="w-full border-2 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-800 text-swiss-black dark:text-zinc-100 px-3 py-2 font-mono text-base sm:text-sm focus:outline-none focus:bg-zinc-50 dark:focus:bg-zinc-700/60 transition-colors placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
               />
             </div>
 
             <div>
-              <label className="block text-xs font-mono font-bold uppercase mb-1 text-zinc-700">
+              <label className="block text-xs font-mono font-bold uppercase mb-1 text-zinc-700 dark:text-zinc-300">
                 设置密码 (PASSWORD)
               </label>
               <input
@@ -271,12 +271,12 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="设置密码 (不少于4位)"
-                className="w-full border-2 border-swiss-black px-3 py-2 font-mono text-sm focus:outline-none focus:bg-zinc-50 transition-colors placeholder:text-zinc-400"
+                className="w-full border-2 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-800 text-swiss-black dark:text-zinc-100 px-3 py-2 font-mono text-base sm:text-sm focus:outline-none focus:bg-zinc-50 dark:focus:bg-zinc-700/60 transition-colors placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
               />
             </div>
 
             <div>
-              <label className="block text-xs font-mono font-bold uppercase mb-1 text-zinc-700 flex items-center justify-between">
+              <label className="block text-xs font-mono font-bold uppercase mb-1 text-zinc-700 dark:text-zinc-300 flex items-center justify-between">
                 <span>系统邀请码 (INVITATION CODE)</span>
                 <span className="text-swiss-red font-bold text-[10px]">* 必填以激活</span>
               </label>
@@ -287,16 +287,16 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
                   value={invitationCode}
                   onChange={(e) => setInvitationCode(e.target.value)}
                   placeholder="请输入系统邀请码"
-                  className="w-full border-2 border-swiss-black px-3 py-2 font-mono text-sm focus:outline-none focus:bg-zinc-50 transition-colors placeholder:text-zinc-400"
+                  className="w-full border-2 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-800 text-swiss-black dark:text-zinc-100 px-3 py-2 font-mono text-base sm:text-sm focus:outline-none focus:bg-zinc-50 dark:focus:bg-zinc-700/60 transition-colors placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
                 />
-                <div className="absolute right-3 top-2.5 text-zinc-400">
+                <div className="absolute right-3 top-2.5 text-zinc-400 dark:text-zinc-500">
                   <KeyRound className="w-4 h-4" />
                 </div>
               </div>
             </div>
 
             <div>
-              <label className="block text-xs font-mono font-bold uppercase mb-1 text-zinc-700">
+              <label className="block text-xs font-mono font-bold uppercase mb-1 text-zinc-700 dark:text-zinc-300">
                 对战昵称 (NICKNAME - 选填)
               </label>
               <input
@@ -304,12 +304,12 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
                 value={nickname}
                 onChange={(e) => setNickname(e.target.value)}
                 placeholder="默认为您的账号名"
-                className="w-full border-2 border-swiss-black px-3 py-2 font-mono text-sm focus:outline-none focus:bg-zinc-50 transition-colors placeholder:text-zinc-400"
+                className="w-full border-2 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-800 text-swiss-black dark:text-zinc-100 px-3 py-2 font-mono text-base sm:text-sm focus:outline-none focus:bg-zinc-50 dark:focus:bg-zinc-700/60 transition-colors placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
               />
             </div>
 
             {error && (
-              <div className="p-3 bg-red-50 border border-red-300 text-red-700 text-xs font-mono">
+              <div className="p-3 bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-900 text-red-700 dark:text-red-300 text-xs font-mono">
                 [ERROR] {error}
               </div>
             )}
@@ -317,7 +317,7 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3 bg-swiss-red hover:bg-rose-700 text-white font-mono text-xs font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+              className="w-full min-h-[44px] py-3 bg-swiss-red hover:bg-rose-700 text-white font-mono text-xs font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-2 disabled:opacity-50 active:scale-[0.99]"
             >
               {loading ? (
                 <span>正在注册激活...</span>
@@ -328,14 +328,14 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
                 </>
               )}
             </button>
-            <p className="text-[11px] font-mono text-zinc-500 text-center">
+            <p className="text-[11px] font-mono text-zinc-500 dark:text-zinc-400 text-center">
               无有效邀请码无法激活，以此杜绝未经许可的额度消耗
             </p>
           </form>
         )}
 
         {/* Footer info */}
-        <div className="mt-6 pt-4 border-t border-zinc-200 flex items-center justify-between text-[10px] text-zinc-500 font-mono">
+        <div className="mt-6 pt-4 border-t border-zinc-200 dark:border-zinc-800 flex items-center justify-between text-[10px] text-zinc-500 dark:text-zinc-400 font-mono">
           <span className="flex items-center gap-1">
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" /> 线上数据持久加密
           </span>

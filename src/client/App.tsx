@@ -14,9 +14,13 @@ import {
   setStoredUser,
   getPlayerNickname,
   setPlayerNickname,
+  getStoredTheme,
+  setStoredTheme,
+  type AppTheme,
 } from './utils/storage.js';
 
 export const App: React.FC = () => {
+  const [theme, setTheme] = useState<AppTheme>(() => getStoredTheme());
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(() => getStoredUser());
   const [currentView, setCurrentView] = useState<'home' | 'solo' | 'pvp-lobby' | 'pvp-match' | 'history'>('home');
@@ -77,6 +81,12 @@ export const App: React.FC = () => {
       // In case server is temporarily restarting, keep session if token exists
       setIsAuthenticated(true);
     }
+  };
+
+  const handleToggleTheme = () => {
+    const next: AppTheme = theme === 'dark' ? 'light' : 'dark';
+    setTheme(next);
+    setStoredTheme(next);
   };
 
   const handleAuthSuccess = (user: AuthUser) => {
@@ -154,7 +164,7 @@ export const App: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen flex flex-col bg-swiss-paper text-swiss-black font-sans swiss-grid-bg">
+    <div className="min-h-screen flex flex-col bg-swiss-paper dark:bg-swiss-paper-dark text-swiss-black dark:text-zinc-100 font-sans swiss-grid-bg transition-colors duration-150">
       {!isAuthenticated && (
         <PasswordGate onSuccess={handleAuthSuccess} />
       )}
@@ -167,10 +177,12 @@ export const App: React.FC = () => {
           username={currentUser?.username}
           onChangeNickname={handleChangeNickname}
           onLogout={handleLogout}
+          theme={theme}
+          onToggleTheme={handleToggleTheme}
         />
       )}
 
-      <main className="flex-1">
+      <main className="flex-1 pb-safe">
         {currentView === 'home' && (
           <HomeView
             onStartSolo={handleStartSolo}
@@ -200,6 +212,8 @@ export const App: React.FC = () => {
             ws={pvpState.ws}
             playerId={playerId}
             onExit={handleExitMatch}
+            theme={theme}
+            onToggleTheme={handleToggleTheme}
           />
         )}
 
@@ -210,11 +224,11 @@ export const App: React.FC = () => {
 
       {/* Swiss Minimalist Footer */}
       {currentView !== 'pvp-match' && (
-        <footer className="border-t-2 border-swiss-black bg-white py-6 mt-16 font-mono text-xs text-zinc-500">
+        <footer className="border-t-2 border-swiss-black dark:border-zinc-800 bg-white dark:bg-zinc-900 py-6 mt-16 font-mono text-xs text-zinc-500 dark:text-zinc-400">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-wrap items-center justify-between gap-4">
             <div className="flex items-center gap-2">
               <span className="w-2.5 h-2.5 bg-swiss-red"></span>
-              <span className="font-bold text-swiss-black uppercase">
+              <span className="font-bold text-swiss-black dark:text-zinc-100 uppercase">
                 TRANSLATION TRAINING // 2002–2026
               </span>
             </div>

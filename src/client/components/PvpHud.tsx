@@ -24,20 +24,20 @@ export const PvpHud: React.FC<PvpHudProps> = ({
   const isTimeLow = secondsRemaining <= 60 && secondsRemaining > 0;
 
   return (
-    <div className="bg-swiss-black text-white border-b-2 border-swiss-black sticky top-0 md:top-16 z-30 shadow-md">
-      <div className="max-w-7xl mx-auto px-2 sm:px-4 py-1.5 sm:py-2">
+    <div className="bg-swiss-black dark:bg-zinc-950 text-white border-b-2 border-swiss-black dark:border-zinc-800 sticky top-0 z-30 shadow-md transition-colors duration-150">
+      <div className="max-w-7xl mx-auto px-1.5 sm:px-4 py-1.5 sm:py-2">
         <div className="grid grid-cols-12 items-center gap-1 sm:gap-2">
           {/* Left Column: Player 1 (You) - 5 cols */}
-          <div className="col-span-5 flex items-center gap-1.5 sm:gap-2.5 overflow-hidden">
-            <div className="w-8 h-8 sm:w-9 sm:h-9 bg-white text-swiss-black shrink-0 flex items-center justify-center font-mono font-black text-sm sm:text-base border border-white">
+          <div className="col-span-5 flex items-center gap-1 sm:gap-2.5 overflow-hidden">
+            <div className="w-7 h-7 xs:w-8 xs:h-8 sm:w-9 sm:h-9 bg-white dark:bg-zinc-100 text-swiss-black dark:text-zinc-950 shrink-0 flex items-center justify-center font-mono font-black text-xs sm:text-base border border-white dark:border-zinc-200">
               {myPlayer.totalScore.toFixed(1)}
             </div>
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1">
-                <span className="font-bold text-xs sm:text-sm tracking-tight truncate text-zinc-100">
+                <span className="font-bold text-[11px] sm:text-sm tracking-tight truncate text-zinc-100">
                   {myPlayer.nickname}
                 </span>
-                <span className="text-[9px] bg-swiss-red px-1 py-0 font-mono font-semibold uppercase shrink-0">
+                <span className="text-[8px] sm:text-[9px] bg-swiss-red px-1 py-0 font-mono font-semibold uppercase shrink-0">
                   YOU
                 </span>
               </div>
@@ -58,7 +58,7 @@ export const PvpHud: React.FC<PvpHudProps> = ({
                           ? `已得分 +${sub.gradingResult?.score.toFixed(1)}`
                           : '未作答'
                       }`}
-                      className={`w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0 flex items-center justify-center font-mono text-[8px] sm:text-[9px] border ${
+                      className={`w-3 h-3 xs:w-3.5 xs:h-3.5 sm:w-4 sm:h-4 shrink-0 flex items-center justify-center font-mono text-[7px] xs:text-[8px] sm:text-[9px] border ${
                         sub?.gradingStatus === 'graded'
                           ? 'bg-emerald-500 border-emerald-400 text-white font-bold'
                           : sub?.gradingStatus === 'grading'
@@ -71,11 +71,11 @@ export const PvpHud: React.FC<PvpHudProps> = ({
                       }`}
                     >
                       {sub?.gradingStatus === 'grading' ? (
-                        <Loader2 className="w-2 h-2 animate-spin" />
+                        <Loader2 className="w-1.5 h-1.5 sm:w-2 sm:h-2 animate-spin" />
                       ) : sub?.gradingStatus === 'waiting_pair' ? (
-                        <Hourglass className="w-2 h-2" />
+                        <Hourglass className="w-1.5 h-1.5 sm:w-2 sm:h-2" />
                       ) : sub?.gradingStatus === 'graded' ? (
-                        <Check className="w-2 h-2 stroke-[3]" />
+                        <Check className="w-1.5 h-1.5 sm:w-2 sm:h-2 stroke-[3]" />
                       ) : (
                         idx + 1
                       )}
@@ -88,11 +88,11 @@ export const PvpHud: React.FC<PvpHudProps> = ({
 
           {/* Center Column: Timer & Room Code - 2 cols */}
           <div className="col-span-2 flex flex-col items-center justify-center font-mono px-0.5">
-            <span className="text-[8px] sm:text-[9px] text-zinc-400 uppercase tracking-tighter truncate max-w-full">
+            <span className="text-[7px] xs:text-[8px] sm:text-[9px] text-zinc-400 uppercase tracking-tighter truncate max-w-full">
               {roomCode}
             </span>
             <div
-              className={`flex items-center justify-center text-xs sm:text-base font-black px-1.5 py-0.5 border ${
+              className={`flex items-center justify-center text-[10px] xs:text-xs sm:text-base font-black px-1 sm:px-1.5 py-0.5 border ${
                 isTimeLow
                   ? 'bg-swiss-red border-swiss-red text-white animate-pulse'
                   : 'bg-zinc-900 border-zinc-700 text-zinc-100'
@@ -103,13 +103,13 @@ export const PvpHud: React.FC<PvpHudProps> = ({
           </div>
 
           {/* Right Column: Player 2 (Opponent) - 5 cols */}
-          <div className="col-span-5 flex items-center justify-end gap-1.5 sm:gap-2.5 overflow-hidden">
+          <div className="col-span-5 flex items-center justify-end gap-1 sm:gap-2.5 overflow-hidden">
             <div className="min-w-0 flex-1 text-right">
               <div className="flex items-center justify-end gap-1">
-                <span className="text-[9px] bg-zinc-700 px-1 py-0 font-mono font-semibold uppercase shrink-0">
+                <span className="text-[8px] sm:text-[9px] bg-zinc-700 px-1 py-0 font-mono font-semibold uppercase shrink-0">
                   RIVAL
                 </span>
-                <span className="font-bold text-xs sm:text-sm tracking-tight truncate text-zinc-100">
+                <span className="font-bold text-[11px] sm:text-sm tracking-tight truncate text-zinc-100">
                   {opponentPlayer ? opponentPlayer.nickname : '对手'}
                 </span>
               </div>
@@ -125,7 +125,7 @@ export const PvpHud: React.FC<PvpHudProps> = ({
                     <div
                       key={idx}
                       title={`对手第 ${idx + 1} 题：${sub?.gradingStatus || '未开始'}`}
-                      className={`w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0 flex items-center justify-center font-mono text-[8px] sm:text-[9px] border ${
+                      className={`w-3 h-3 xs:w-3.5 xs:h-3.5 sm:w-4 sm:h-4 shrink-0 flex items-center justify-center font-mono text-[7px] xs:text-[8px] sm:text-[9px] border ${
                         sub?.gradingStatus === 'graded'
                           ? 'bg-emerald-500 border-emerald-400 text-white font-bold'
                           : sub?.gradingStatus === 'grading'
@@ -138,11 +138,11 @@ export const PvpHud: React.FC<PvpHudProps> = ({
                       }`}
                     >
                       {sub?.gradingStatus === 'grading' ? (
-                        <Loader2 className="w-2 h-2 animate-spin" />
+                        <Loader2 className="w-1.5 h-1.5 sm:w-2 sm:h-2 animate-spin" />
                       ) : sub?.gradingStatus === 'waiting_pair' ? (
-                        <Hourglass className="w-2 h-2" />
+                        <Hourglass className="w-1.5 h-1.5 sm:w-2 sm:h-2" />
                       ) : sub?.gradingStatus === 'graded' ? (
-                        <Check className="w-2 h-2 stroke-[3]" />
+                        <Check className="w-1.5 h-1.5 sm:w-2 sm:h-2 stroke-[3]" />
                       ) : (
                         idx + 1
                       )}
@@ -151,7 +151,7 @@ export const PvpHud: React.FC<PvpHudProps> = ({
                 })}
               </div>
             </div>
-            <div className="w-8 h-8 sm:w-9 sm:h-9 bg-zinc-800 text-white shrink-0 flex items-center justify-center font-mono font-black text-sm sm:text-base border border-zinc-700">
+            <div className="w-7 h-7 xs:w-8 xs:h-8 sm:w-9 sm:h-9 bg-zinc-800 dark:bg-zinc-900 text-white shrink-0 flex items-center justify-center font-mono font-black text-xs sm:text-base border border-zinc-700">
               {opponentPlayer ? opponentPlayer.totalScore.toFixed(1) : '0.0'}
             </div>
           </div>

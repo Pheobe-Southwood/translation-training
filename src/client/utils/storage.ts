@@ -5,7 +5,33 @@ const STORAGE_KEYS = {
   USER: 'tt_auth_user',
   NICKNAME: 'tt_player_nickname',
   HISTORY: 'tt_session_history',
+  THEME: 'tt_theme',
 };
+
+export type AppTheme = 'light' | 'dark';
+
+export function getStoredTheme(): AppTheme {
+  const saved = localStorage.getItem(STORAGE_KEYS.THEME);
+  if (saved === 'dark' || saved === 'light') {
+    return saved;
+  }
+  if (typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+    return 'dark';
+  }
+  return 'light';
+}
+
+export function setStoredTheme(theme: AppTheme): void {
+  localStorage.setItem(STORAGE_KEYS.THEME, theme);
+  if (typeof document !== 'undefined') {
+    if (theme === 'dark') {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+  }
+}
+
 
 export function getAuthToken(): string | null {
   return localStorage.getItem(STORAGE_KEYS.TOKEN);
