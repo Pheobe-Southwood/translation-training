@@ -136,6 +136,21 @@ class AppDatabase {
 
   // --- History Records Operations ---
   public saveHistoryRecord(userId: string, record: HistorySessionRecord): void {
+    const submissionsJson = JSON.stringify(record.submissions || []);
+    const pvpDetailsJson = record.pvpDetails ? JSON.stringify(record.pvpDetails) : null;
+    const now = record.timestamp || Date.now();
+
+    // Defense-in-depth: Check for duplicate submissions within a short window (e.g. 60s)
+    // to prevent duplicate inserts even if client generated a slightly different id.
+    const dupCheckStmt = this.db.prepare(`
+      SELECT id FROM history_records
+      WHERE user_id = ? AND type = ? AND year = ? AND submissions_json = ? AND abs(timestamp - ?) < 60000
+      LIMIT 1
+    `);
+    const existing = dupCheckStmt.get(userId, record.type, record.year, submissionsJson, now) as { id: string } | undefined;
+
+    const targetId = existing?.id || record.id;
+
     const stmt = this.db.prepare(`
       INSERT INTO history_records (
         id, user_id, type, year, timestamp, total_score, time_spent_seconds, submissions_json, pvp_details_json
@@ -147,15 +162,15 @@ class AppDatabase {
     `);
 
     stmt.run(
-      record.id,
+      targetId,
       userId,
       record.type,
       record.year,
-      record.timestamp || Date.now(),
+      now,
       record.totalScore,
       record.timeSpentSeconds || 0,
-      JSON.stringify(record.submissions || []),
-      record.pvpDetails ? JSON.stringify(record.pvpDetails) : null
+      submissionsJson,
+      pvpDetailsJson
     );
   }
 

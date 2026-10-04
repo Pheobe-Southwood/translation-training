@@ -35,6 +35,10 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
   const [activeCardTab, setActiveCardTab] = useState<number | null>(null);
   const [isPassageOpenMobile, setIsPassageOpenMobile] = useState(false);
 
+  const sessionIdRef = useRef<string>(
+    `solo-${year}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  );
+  const hasPersistedRef = useRef<boolean>(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -127,18 +131,14 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
       }
 
       const data = await res.json();
-      setSubmissions((prev) => {
-        const updated = {
-          ...prev,
-          [segmentIndex]: {
-            ...prev[segmentIndex],
-            gradingStatus: 'graded' as const,
-            gradingResult: data.gradingResult,
-          },
-        };
-        checkAndPersistHistoryIfDone(updated);
-        return updated;
-      });
+      setSubmissions((prev) => ({
+        ...prev,
+        [segmentIndex]: {
+          ...prev[segmentIndex],
+          gradingStatus: 'graded' as const,
+          gradingResult: data.gradingResult,
+        },
+      }));
     } catch (err: any) {
       console.error('Grading error:', err);
       setSubmissions((prev) => ({
@@ -152,25 +152,28 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
     }
   };
 
-  const checkAndPersistHistoryIfDone = (currentSubs: Record<number, SegmentSubmission>) => {
-    const keys = Object.keys(currentSubs);
+  useEffect(() => {
+    if (!isAllCompleted || hasPersistedRef.current) return;
+
+    const keys = Object.keys(submissions);
     if (keys.length === 5) {
-      const allSettled = Object.values(currentSubs).every(
+      const allSettled = Object.values(submissions).every(
         (s) => s.gradingStatus === 'graded' || s.gradingStatus === 'error'
       );
       if (allSettled) {
-        const finalScore = Object.values(currentSubs).reduce(
+        hasPersistedRef.current = true;
+        const finalScore = Object.values(submissions).reduce(
           (sum, s) => sum + (s.gradingResult?.score || 0),
           0
         );
         const record: HistorySessionRecord = {
-          id: `solo-${Date.now()}`,
+          id: sessionIdRef.current,
           type: 'solo',
           year,
           timestamp: Date.now(),
           totalScore: finalScore,
           timeSpentSeconds: Math.floor((Date.now() - startTime) / 1000),
-          submissions: Object.values(currentSubs),
+          submissions: Object.values(submissions),
         };
         saveHistoryRecord(record);
         // Persist to online server database
@@ -195,7 +198,7 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
         } catch {}
       }
     }
-  };
+  }, [submissions, isAllCompleted, year, startTime]);
 
   const renderPassageWithHighlight = (passage: string, activeSentence: string) => {
     if (!passage) return null;
@@ -475,6 +478,8 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
             <div className="flex flex-wrap items-center justify-center gap-3 sm:gap-4 pt-4">
               <button
                 onClick={() => {
+                  sessionIdRef.current = `solo-${year}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                  hasPersistedRef.current = false;
                   setCurrentIdx(0);
                   setIsAllCompleted(false);
                   setSubmissions({});
