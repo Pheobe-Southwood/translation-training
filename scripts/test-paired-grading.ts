@@ -1,5 +1,6 @@
 import { spawn } from 'child_process';
 import { WebSocket } from 'ws';
+import { generateUserToken } from '../src/server/auth.js';
 
 async function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -30,31 +31,28 @@ async function testPairedPvp() {
   }
 
   try {
-    const authRes = await fetch('http://127.0.0.1:8891/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: 'tt8888' }),
-    });
-    const { token } = await authRes.json();
-
     const hostId = 'p_paired_a';
     const guestId = 'p_paired_b';
-    const wsUrl = `ws://127.0.0.1:8891/ws?token=${token}`;
+    const hostToken = generateUserToken(hostId);
+    const guestToken = generateUserToken(guestId);
 
-    const hostWs = new WebSocket(`${wsUrl}&playerId=${hostId}`);
-    const guestWs = new WebSocket(`${wsUrl}&playerId=${guestId}`);
+    const hostWs = new WebSocket(`ws://127.0.0.1:8891/ws?token=${hostToken}&playerId=${hostId}`);
+    const guestWs = new WebSocket(`ws://127.0.0.1:8891/ws?token=${guestToken}&playerId=${guestId}`);
 
     let roomCode = '';
 
+    await Promise.all([
+      new Promise<void>((r) => hostWs.once('open', () => r())),
+      new Promise<void>((r) => guestWs.once('open', () => r())),
+    ]);
+
     await new Promise<void>((resolve, reject) => {
-      hostWs.on('open', () => {
-        hostWs.send(
-          JSON.stringify({
-            type: 'room:create',
-            payload: { nickname: '玩家A', year: 2024, durationMinutes: 10 },
-          })
-        );
-      });
+      hostWs.send(
+        JSON.stringify({
+          type: 'room:create',
+          payload: { nickname: '玩家A', year: 2024, durationMinutes: 10 },
+        })
+      );
 
       hostWs.on('message', (d) => {
         const msg = JSON.parse(d.toString());
@@ -73,10 +71,6 @@ async function testPairedPvp() {
         } else if (msg.type === 'room:state' && msg.payload.status === 'IN_PROGRESS') {
           resolve();
         }
-      });
-
-      guestWs.on('open', () => {
-        console.log('Guest WS opened');
       });
 
       setTimeout(() => reject(new Error('PVP Match Setup timed out')), 12000);

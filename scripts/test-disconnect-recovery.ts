@@ -1,5 +1,6 @@
 import { spawn } from 'child_process';
 import { WebSocket } from 'ws';
+import { generateUserToken } from '../src/server/auth.js';
 
 async function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -31,19 +32,13 @@ async function run() {
   }
 
   try {
-    const authRes = await fetch('http://127.0.0.1:8890/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: 'tt8888' }),
-    });
-    const { token } = await authRes.json();
-
     const hostId = 'p_host_test';
     const guestId = 'p_guest_test';
-    const wsUrl = `ws://127.0.0.1:8890/ws?token=${token}`;
+    const hostToken = generateUserToken(hostId);
+    const guestToken = generateUserToken(guestId);
 
     console.log('\n--- Step 1: Host creates room ---');
-    let hostWs = new WebSocket(`${wsUrl}&playerId=${hostId}`);
+    let hostWs = new WebSocket(`ws://127.0.0.1:8890/ws?token=${hostToken}&playerId=${hostId}`);
     let roomCode = '';
 
     await new Promise<void>((resolve, reject) => {
@@ -71,7 +66,7 @@ async function run() {
     await wait(1000);
 
     console.log('\n--- Step 3: Friend tries to join room code while host is offline ---');
-    const guestWs = new WebSocket(`${wsUrl}&playerId=${guestId}`);
+    const guestWs = new WebSocket(`ws://127.0.0.1:8890/ws?token=${guestToken}&playerId=${guestId}`);
     let guestJoined = false;
 
     await new Promise<void>((resolve, reject) => {
@@ -103,7 +98,7 @@ async function run() {
     });
 
     console.log('\n--- Step 4: Host returns to browser and reconnects to room ---');
-    hostWs = new WebSocket(`${wsUrl}&playerId=${hostId}`);
+    hostWs = new WebSocket(`ws://127.0.0.1:8890/ws?token=${hostToken}&playerId=${hostId}`);
     let hostReconnected = false;
 
     await new Promise<void>((resolve, reject) => {

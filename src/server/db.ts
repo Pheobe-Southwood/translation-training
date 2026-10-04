@@ -140,14 +140,14 @@ class AppDatabase {
     const pvpDetailsJson = record.pvpDetails ? JSON.stringify(record.pvpDetails) : null;
     const now = record.timestamp || Date.now();
 
-    // Defense-in-depth: Check for duplicate submissions within a short window (e.g. 60s)
-    // to prevent duplicate inserts even if client generated a slightly different id.
+    // Defense-in-depth: Check for duplicate/prior submissions within a window (e.g. 120s)
+    // or by matching record id, to update in place and prevent duplicate inserts.
     const dupCheckStmt = this.db.prepare(`
       SELECT id FROM history_records
-      WHERE user_id = ? AND type = ? AND year = ? AND submissions_json = ? AND abs(timestamp - ?) < 60000
+      WHERE user_id = ? AND type = ? AND year = ? AND (id = ? OR abs(timestamp - ?) < 120000)
       LIMIT 1
     `);
-    const existing = dupCheckStmt.get(userId, record.type, record.year, submissionsJson, now) as { id: string } | undefined;
+    const existing = dupCheckStmt.get(userId, record.type, record.year, record.id, now) as { id: string } | undefined;
 
     const targetId = existing?.id || record.id;
 

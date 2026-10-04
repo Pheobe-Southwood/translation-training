@@ -1,5 +1,8 @@
 import { spawn, ChildProcess } from 'child_process';
 import { WebSocket } from 'ws';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 async function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -46,22 +49,32 @@ async function runTests() {
     console.log('Health check response:', healthData);
     if (healthData.status !== 'ok') throw new Error('Health check failed');
 
-    // 2. Auth - Wrong password
-    console.log('\n--- Test 2: Auth with wrong password ---');
-    const wrongAuthRes = await fetch(`${BASE_URL}/api/auth/login`, {
+    // 2. Auth - Register & Login
+    console.log('\n--- Test 2: Auth register & login ---');
+    const username = `verify_user_${Date.now().toString().slice(-4)}`;
+    const regRes = await fetch(`${BASE_URL}/api/auth/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: 'wrong' }),
+      body: JSON.stringify({
+        username,
+        password: 'Password123!',
+        invitationCode: 'tt8888',
+        nickname: '验证用户',
+      }),
     });
-    console.log('Wrong auth status:', wrongAuthRes.status);
-    if (wrongAuthRes.status !== 401) throw new Error('Wrong password should return 401');
+    const regData = await regRes.json();
+    console.log('Register response:', regData);
+    if (!regData.success || !regData.token) throw new Error('Registration failed');
 
-    // 3. Auth - Correct password
-    console.log('\n--- Test 3: Auth with correct password (tt8888) ---');
+    // 3. Auth - Login
+    console.log('\n--- Test 3: Auth login ---');
     const authRes = await fetch(`${BASE_URL}/api/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: 'tt8888' }),
+      body: JSON.stringify({
+        username,
+        password: 'Password123!',
+      }),
     });
     const authData = await authRes.json();
     console.log('Auth login response:', authData);
