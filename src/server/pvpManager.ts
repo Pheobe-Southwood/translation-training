@@ -425,12 +425,12 @@ class PvpManager {
     // Broadcast updated room state (so players know all inputs are locked)
     this.broadcastRoomState(room.roomCode);
 
-    // Set a 60-second guardrail timer to prevent rooms getting permanently stuck
+    // Set a 120-second guardrail timer to prevent rooms getting permanently stuck
     // in case DeepSeek API hangs or encounters network failure
     const guardrail = setTimeout(() => {
-      console.warn(`[PVP] Guardrail timeout reached (60s) for room ${roomCode}. Force-finishing match.`);
+      console.warn(`[PVP] Guardrail timeout reached (120s) for room ${roomCode}. Force-finishing match.`);
       this.forceFinishHangingRoom(roomCode);
-    }, 60000);
+    }, 120000);
     this.guardrailTimers.set(roomCode, guardrail);
 
     // Check if all grading is already complete (e.g. neither answered remaining questions)
