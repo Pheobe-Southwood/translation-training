@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "dev:server": "tsx watch src/server/index.ts",
-    "build:client": "vite build",
+    "build:client": "NODE_ENV=production vite build --mode production",
     "build:server": "tsc -p tsconfig.server.json && mkdir -p dist/shared/data && cp src/shared/data/exams.json dist/shared/data/",
     "build": "pnpm build:client && pnpm build:server",
     "start": "node dist/server/index.js",

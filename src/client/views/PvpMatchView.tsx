@@ -48,6 +48,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
   const [activeCardTab, setActiveCardTab] = useState<number | null>(null);
   const [isPassageOpenMobile, setIsPassageOpenMobile] = useState(false);
 
+  const hasPersistedRef = useRef<boolean>(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Sync WebSocket messages
@@ -104,10 +105,12 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
   }, [currentIdx]);
 
   const handleMatchSettled = (finalState: PvpRoomState) => {
+    if (hasPersistedRef.current) return;
     const me = finalState.players[playerId];
     const opp = Object.values(finalState.players).find((p) => p.playerId !== playerId);
 
     if (me && opp) {
+      hasPersistedRef.current = true;
       const isWinner = finalState.winnerId === playerId;
       const isDraw = finalState.winnerId === 'draw';
       const outcome = isWinner ? 'win' : isDraw ? 'draw' : 'loss';
@@ -119,9 +122,9 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
         } catch {}
       }
 
-      // Persist to history
+      // Persist to history with deterministic room-based id
       const record: HistorySessionRecord = {
-        id: `pvp-${Date.now()}`,
+        id: `pvp-${finalState.roomCode}-${finalState.startedAt || Date.now()}-${playerId}`,
         type: 'pvp',
         year: finalState.year,
         timestamp: Date.now(),
