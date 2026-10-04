@@ -32,6 +32,15 @@ class PvpManager {
   }
 
   public registerClient(playerId: string, ws: WebSocket) {
+    const previousSocket = this.playerSockets.get(playerId);
+    if (previousSocket && previousSocket !== ws) {
+      console.log(
+        `[PVP] Replacing stale socket for player ${playerId} (previous readyState=${previousSocket.readyState})`
+      );
+    }
+
+    // The newest socket always owns outgoing replies. A late close event from a
+    // replaced socket must never unregister the live one (see handleDisconnect).
     this.clients.set(playerId, { ws, playerId });
     this.playerSockets.set(playerId, ws);
 
@@ -45,13 +54,16 @@ class PvpManager {
         const client = this.clients.get(playerId);
         if (client) client.roomCode = existingRoom.roomCode;
 
-        console.log(`[PVP] Re-associated socket for player "${player.nickname}" (${playerId}) in room ${existingRoom.roomCode}`);
+        console.log(
+          `[PVP] Re-associated socket for player "${player.nickname}" (${playerId}) in room ${existingRoom.roomCode} ` +
+            `(status=${existingRoom.status}, segment=${player.currentSegmentIndex + 1})`
+        );
         this.broadcastRoomState(existingRoom.roomCode);
       }
     }
 
     ws.on('close', () => {
-      this.handleDisconnect(playerId);
+      this.handleDisconnect(playerId, ws);
     });
 
     ws.on('message', (raw: any) => {
@@ -180,21 +192,25 @@ class PvpManager {
       return this.sendError(playerId, `未找到房间号：${code}（请检查房间号是否正确或已被房主解散）`);
     }
 
-    if (room.status !== 'WAITING' && room.status !== 'READY') {
-      return this.sendError(playerId, '对战已开始或已结束，无法加入');
+    const existingPlayer = room.players[playerId];
+
+    // Only brand-new challengers are blocked once a match is under way. A player
+    // who already belongs to the room may always come back (page refresh, network
+    // loss, app switch) WITHOUT losing their answers or their current question.
+    if (!existingPlayer && room.status !== 'WAITING' && room.status !== 'READY') {
+      return this.sendError(playerId, '对战已开始或已结束，无法加入', 'MATCH_ALREADY_STARTED');
     }
 
-    const playerKeys = Object.keys(room.players);
-    if (playerKeys.length >= 2 && !room.players[playerId]) {
-      return this.sendError(playerId, '房间已满（仅支持双人对战）');
+    if (!existingPlayer && Object.keys(room.players).length >= 2) {
+      return this.sendError(playerId, '房间已满（仅支持双人对战）', 'ROOM_FULL');
     }
 
-    // Existing player rejoining
-    if (room.players[playerId]) {
-      room.players[playerId].isOnline = true;
-      room.players[playerId].lastActiveAt = Date.now();
+    if (existingPlayer) {
+      // Rejoining player: refresh presence only, never reset progress.
+      existingPlayer.isOnline = true;
+      existingPlayer.lastActiveAt = Date.now();
       if (payload.nickname) {
-        room.players[playerId].nickname = payload.nickname.trim().slice(0, 16);
+        existingPlayer.nickname = payload.nickname.trim().slice(0, 16);
       }
     } else {
       // New challenger player
@@ -215,7 +231,11 @@ class PvpManager {
     const client = this.clients.get(playerId);
     if (client) client.roomCode = code;
 
-    console.log(`[PVP] Player ${room.players[playerId].nickname} (${playerId}) joined room ${code}. Total players: ${Object.keys(room.players).length}`);
+    const joined = room.players[playerId];
+    console.log(
+      `[PVP] Player ${joined.nickname} (${playerId}) ${existingPlayer ? 're-' : ''}joined room ${code}. ` +
+        `Total players: ${Object.keys(room.players).length}, status=${room.status}, segment=${joined.currentSegmentIndex + 1}`
+    );
     this.broadcastRoomState(code);
   }
 
@@ -460,14 +480,44 @@ class PvpManager {
     const client = this.clients.get(playerId);
     if (!client?.roomCode) return;
     const room = this.rooms.get(client.roomCode);
-    if (!room || room.status !== 'IN_PROGRESS') return;
+    if (!room) return;
+
+    if (room.status !== 'IN_PROGRESS') {
+      return this.sendError(playerId, '对战未在进行中，无法提交', 'NOT_IN_PROGRESS');
+    }
 
     const player = room.players[playerId];
-    if (!player || player.isFinished) return;
+    if (!player) return;
 
-    const segmentIdx = payload.segmentIndex;
-    const originalText = room.exam.translationSegments[segmentIdx] || '';
+    if (player.isFinished) {
+      return this.sendError(playerId, '你已交卷，无法继续提交', 'ALREADY_FINISHED');
+    }
+
+    const segmentIdx = Number(payload.segmentIndex);
+    if (!Number.isInteger(segmentIdx) || segmentIdx < 0 || segmentIdx > 4) {
+      console.warn(
+        `[PVP] Invalid segment index ${JSON.stringify(payload.segmentIndex)} from player ${player.nickname} (${playerId}) in room ${room.roomCode}`
+      );
+      return this.sendError(playerId, '题目序号无效，请刷新页面后重试', 'INVALID_SEGMENT');
+    }
+
     const answer = (payload.studentAnswer || '').trim();
+    if (!answer) {
+      return this.sendError(playerId, '译文不能为空', 'EMPTY_ANSWER');
+    }
+
+    // Idempotency: never overwrite an already accepted answer, and never trigger
+    // paired grading twice for the same segment (e.g. duplicate/retried sends).
+    const existingSubmission = player.submissions[segmentIdx];
+    if (existingSubmission && existingSubmission.gradingStatus !== 'error') {
+      console.log(
+        `[PVP] Duplicate submit ignored for player ${player.nickname} (${playerId}) segment ${segmentIdx + 1} in room ${room.roomCode}`
+      );
+      this.sendToPlayer(playerId, { type: 'room:state', payload: room });
+      return;
+    }
+
+    const originalText = room.exam.translationSegments[segmentIdx] || '';
 
     player.lastActiveAt = Date.now();
     player.submissions[segmentIdx] = {
@@ -478,13 +528,17 @@ class PvpManager {
       submittedAt: Date.now(),
     };
 
-    // Advance player to next segment immediately so no blocking
-    if (segmentIdx < 4) {
-      player.currentSegmentIndex = segmentIdx + 1;
-    } else {
+    // Advance player to next segment immediately so no blocking.
+    // Math.max guarantees the client can never be sent backwards to an earlier question.
+    player.currentSegmentIndex = Math.max(player.currentSegmentIndex, Math.min(segmentIdx + 1, 4));
+    if (segmentIdx === 4) {
       player.isFinished = true;
       player.finishedAt = Date.now();
     }
+
+    console.log(
+      `[PVP] Segment ${segmentIdx + 1} submitted by ${player.nickname} (${playerId}) in room ${room.roomCode} (len=${answer.length})`
+    );
 
     // Check if opponent has already submitted this segment
     const players = Object.values(room.players);
@@ -497,6 +551,9 @@ class PvpManager {
       // Opponent hasn't submitted yet, broadcast state
       this.broadcastRoomState(room.roomCode);
     }
+
+    // Safety net: if this submission completed the match, settle it.
+    this.checkAllFinished(room);
   }
 
   private triggerPairedGrading(
@@ -509,8 +566,9 @@ class PvpManager {
     const subB = playerB.submissions[segmentIdx];
     if (!subA || !subB) return;
 
-    // Prevent duplicate trigger if already in grading
-    if (subA.gradingStatus === 'grading' && subB.gradingStatus === 'grading') return;
+    // Prevent a duplicate trigger if either side is already grading or already graded
+    const isSettled = (s: typeof subA) => s.gradingStatus === 'grading' || s.gradingStatus === 'graded';
+    if (isSettled(subA) || isSettled(subB)) return;
 
     subA.gradingStatus = 'grading';
     subB.gradingStatus = 'grading';
@@ -747,12 +805,16 @@ class PvpManager {
     }
 
     if (room && room.players[playerId]) {
+      const player = room.players[playerId];
       const client = this.clients.get(playerId);
       if (client) client.roomCode = room.roomCode;
-      room.players[playerId].isOnline = true;
-      room.players[playerId].lastActiveAt = Date.now();
+      player.isOnline = true;
+      player.lastActiveAt = Date.now();
 
-      console.log(`[PVP] Manual reconnect successful for player ${playerId} into room ${room.roomCode}`);
+      console.log(
+        `[PVP] Manual reconnect successful for player ${playerId} into room ${room.roomCode} ` +
+          `(status=${room.status}, segment=${player.currentSegmentIndex + 1})`
+      );
       this.sendToPlayer(playerId, {
         type: 'room:state',
         payload: room,
@@ -760,6 +822,8 @@ class PvpManager {
       this.broadcastRoomState(room.roomCode);
     } else {
       console.warn(`[PVP] Reconnect failed for player ${playerId}, room not found`);
+      // Explicit, terminal signal so the client stops retrying and tells the user.
+      this.sendError(playerId, '对战已结束或房间已失效', 'ROOM_NOT_FOUND');
     }
   }
 
@@ -818,8 +882,20 @@ class PvpManager {
   /**
    * Socket disconnects unexpectedly (e.g. mobile switch to WeChat, lock screen, network glitch)
    * We PRESERVE the room and do NOT delete it!
+   *
+   * `ws` is the socket that actually closed. If it has already been replaced by a
+   * newer connection (auto-reconnect), we must ignore the stale close event:
+   * otherwise we would delete the LIVE socket from playerSockets, and every future
+   * broadcast to that player would be silently dropped — freezing their client on
+   * whatever question it last rendered.
    */
-  private handleDisconnect(playerId: string) {
+  private handleDisconnect(playerId: string, ws?: WebSocket) {
+    const currentSocket = this.playerSockets.get(playerId);
+    if (ws && currentSocket && currentSocket !== ws) {
+      console.log(`[PVP] Ignoring close event from stale socket for player ${playerId} (live socket still registered)`);
+      return;
+    }
+
     const room = this.findRoomByPlayerId(playerId);
     if (room && room.players[playerId]) {
       room.players[playerId].isOnline = false;
@@ -860,10 +936,10 @@ class PvpManager {
     }
   }
 
-  private sendError(playerId: string, errorMessage: string) {
+  private sendError(playerId: string, errorMessage: string, code?: string) {
     this.sendToPlayer(playerId, {
       type: 'error',
-      payload: { message: errorMessage },
+      payload: code ? { message: errorMessage, code } : { message: errorMessage },
     });
   }
 
