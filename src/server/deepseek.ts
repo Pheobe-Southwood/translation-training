@@ -180,7 +180,7 @@ export async function gradeTranslation(params: {
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(45000),
+    signal: AbortSignal.timeout(90000),
   });
 
   if (!response.ok) {
@@ -282,7 +282,7 @@ export async function gradePvpPairTranslation(params: {
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(45000),
+    signal: AbortSignal.timeout(90000),
   });
 
   if (!response.ok) {
