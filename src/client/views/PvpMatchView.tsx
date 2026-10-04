@@ -12,9 +12,10 @@ import {
   ChevronDown,
   ChevronUp,
   Hourglass,
+  Clock,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
-import type { PvpRoomState, HistorySessionRecord } from '../../shared/types.js';
+import type { PvpRoomState, HistorySessionRecord, SegmentSubmission } from '../../shared/types.js';
 import { PvpHud } from '../components/PvpHud.js';
 import { GradingCard } from '../components/GradingCard.js';
 import { playSuccessSound } from '../utils/sound.js';
@@ -105,22 +106,45 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
   }, [currentIdx]);
 
   const handleMatchSettled = (finalState: PvpRoomState) => {
-    if (hasPersistedRef.current) return;
     const me = finalState.players[playerId];
     const opp = Object.values(finalState.players).find((p) => p.playerId !== playerId);
 
     if (me && opp) {
-      hasPersistedRef.current = true;
       const isWinner = finalState.winnerId === playerId;
       const isDraw = finalState.winnerId === 'draw';
       const outcome = isWinner ? 'win' : isDraw ? 'draw' : 'loss';
 
-      if (isWinner) {
-        playSuccessSound();
-        try {
-          confetti({ particleCount: 100, spread: 80, origin: { y: 0.5 } });
-        } catch {}
+      if (!hasPersistedRef.current) {
+        hasPersistedRef.current = true;
+        if (isWinner) {
+          playSuccessSound();
+          try {
+            confetti({ particleCount: 100, spread: 80, origin: { y: 0.5 } });
+          } catch {}
+        }
       }
+
+      // Ensure 5 submissions are present in sorted order 0..4
+      const submissionsList: SegmentSubmission[] = [0, 1, 2, 3, 4].map((idx) => {
+        return (
+          me.submissions[idx] || {
+            segmentIndex: idx,
+            originalText: finalState.exam.translationSegments[idx] || '',
+            studentAnswer: '（超时未作答）',
+            gradingStatus: 'graded',
+            submittedAt: Date.now(),
+            gradingResult: {
+              score: 0,
+              points_breakdown: [],
+              distortion_deduction: 0,
+              fluency_deduction: 0,
+              critique: '未作答，得0分。',
+              reference_translation: '',
+              gradedAt: Date.now(),
+            },
+          }
+        );
+      });
 
       // Persist to history with deterministic room-based id
       const record: HistorySessionRecord = {
@@ -132,7 +156,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
         timeSpentSeconds: finalState.startedAt
           ? Math.floor((Date.now() - finalState.startedAt) / 1000)
           : 0,
-        submissions: Object.values(me.submissions),
+        submissions: submissionsList,
         pvpDetails: {
           opponentNickname: opp.nickname,
           opponentScore: opp.totalScore,
@@ -569,23 +593,74 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
             </div>
           </div>
         ) : (
-          /* You finished all 5 sentences, waiting for opponent or remaining paired gradings */
+          /* You finished all 5 sentences or match timed out, waiting for opponent or remaining paired gradings */
           <div className="max-w-2xl mx-auto border-2 sm:border-4 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-900 p-6 sm:p-10 shadow-[6px_6px_0px_0px_#09090b] dark:shadow-[6px_6px_0px_0px_#000000] text-center space-y-5 sm:space-y-6">
-            <div className="w-12 h-12 bg-emerald-500 text-white flex items-center justify-center mx-auto">
-              <CheckCircle2 className="w-6 h-6" />
+            <div
+              className={`w-12 h-12 flex items-center justify-center mx-auto text-white ${
+                secondsRemaining <= 0 ? 'bg-amber-500' : 'bg-emerald-500'
+              }`}
+            >
+              {secondsRemaining <= 0 ? <Clock className="w-6 h-6" /> : <CheckCircle2 className="w-6 h-6" />}
             </div>
 
             <h3 className="text-2xl font-black uppercase text-swiss-black dark:text-zinc-100">
-              您已完成全部 5 题翻译！
+              {secondsRemaining <= 0 ? '对战时间已截止，正在终局判分...' : '您已完成全部 5 题翻译！'}
             </h3>
 
             <p className="font-mono text-xs text-zinc-600 dark:text-zinc-400 leading-relaxed">
-              您的全部作答已提交。系统正在等待对手完成相应题目以触发并列裁决，请稍候...
+              {secondsRemaining <= 0
+                ? '比赛时间已耗尽，题目已封锁。系统正在等待已提交题目的 DeepSeek 并列裁决并汇总终局总分，请稍候...'
+                : '您的全部作答已提交。系统正在等待对手完成相应题目以触发并列裁决，请稍候...'}
             </p>
 
             <div className="py-4 border-y border-zinc-200 dark:border-zinc-800 flex items-center justify-center gap-2 font-mono text-sm text-zinc-800 dark:text-zinc-200">
               <Loader2 className="w-4 h-4 animate-spin text-swiss-red" />
               <span>当前累计已出分：{myPlayer.totalScore.toFixed(1)} / 10.0</span>
+            </div>
+
+            {/* Real-time Per-Segment Grading Progress */}
+            <div className="text-left space-y-2.5 pt-2">
+              <div className="font-mono text-xs font-bold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">
+                各题裁决与出分进度：
+              </div>
+              <div className="space-y-2">
+                {[0, 1, 2, 3, 4].map((idx) => {
+                  const sub = myPlayer.submissions[idx];
+                  if (!sub) return null;
+                  return (
+                    <div
+                      key={idx}
+                      className="p-3 bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200 dark:border-zinc-700 flex items-center justify-between text-xs font-mono"
+                    >
+                      <div className="flex items-center gap-2 overflow-hidden mr-2">
+                        <span className="font-bold text-swiss-black dark:text-zinc-200 shrink-0">
+                          第 {idx + 1} 题：
+                        </span>
+                        <span className="truncate text-zinc-600 dark:text-zinc-400">
+                          {sub.studentAnswer}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {sub.gradingStatus === 'waiting_pair' ? (
+                          <span className="text-blue-600 dark:text-blue-400 font-bold flex items-center gap-1">
+                            <Hourglass className="w-3.5 h-3.5 animate-pulse" /> 等待对手
+                          </span>
+                        ) : sub.gradingStatus === 'grading' ? (
+                          <span className="text-amber-600 dark:text-amber-400 font-bold flex items-center gap-1">
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" /> 正在裁决
+                          </span>
+                        ) : sub.gradingStatus === 'graded' ? (
+                          <span className="text-emerald-600 dark:text-emerald-400 font-bold">
+                            +{sub.gradingResult?.score.toFixed(1) || '0.0'} 分
+                          </span>
+                        ) : (
+                          <span className="text-zinc-400 font-bold">已超时</span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </div>
         )}
