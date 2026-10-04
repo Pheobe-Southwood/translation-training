@@ -6,9 +6,71 @@ const STORAGE_KEYS = {
   NICKNAME: 'tt_player_nickname',
   HISTORY: 'tt_session_history',
   THEME: 'tt_theme',
+  ACTIVE_PVP_ROOM: 'tt_active_pvp_room',
+  PVP_DRAFT: 'tt_pvp_draft',
 };
 
 export type AppTheme = 'light' | 'dark';
+
+/**
+ * Room code of the match the player is currently in. Persisted so a page refresh
+ * or a mobile browser restore mid-match can resume instead of being stranded.
+ */
+export function getActivePvpRoom(): string | null {
+  try {
+    return localStorage.getItem(STORAGE_KEYS.ACTIVE_PVP_ROOM);
+  } catch {
+    return null;
+  }
+}
+
+export function setActivePvpRoom(roomCode: string): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.ACTIVE_PVP_ROOM, roomCode.toUpperCase().trim());
+  } catch {}
+}
+
+export function clearActivePvpRoom(): void {
+  try {
+    localStorage.removeItem(STORAGE_KEYS.ACTIVE_PVP_ROOM);
+  } catch {}
+}
+
+export interface PvpDraft {
+  roomCode: string;
+  segmentIndex: number;
+  answer: string;
+  updatedAt: number;
+}
+
+/**
+ * Unsent translation for the current question. Kept in sessionStorage so that a
+ * submission lost to a dropped socket, a refresh, or an app switch can be
+ * restored into the textarea instead of vanishing.
+ */
+export function getPvpDraft(): PvpDraft | null {
+  try {
+    const raw = sessionStorage.getItem(STORAGE_KEYS.PVP_DRAFT);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PvpDraft;
+    if (!parsed || typeof parsed.answer !== 'string') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function setPvpDraft(draft: PvpDraft): void {
+  try {
+    sessionStorage.setItem(STORAGE_KEYS.PVP_DRAFT, JSON.stringify(draft));
+  } catch {}
+}
+
+export function clearPvpDraft(): void {
+  try {
+    sessionStorage.removeItem(STORAGE_KEYS.PVP_DRAFT);
+  } catch {}
+}
 
 export function getStoredTheme(): AppTheme {
   const saved = localStorage.getItem(STORAGE_KEYS.THEME);

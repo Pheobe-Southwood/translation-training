@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Swords,
   Copy,
@@ -13,7 +13,8 @@ import {
   Sparkles,
 } from 'lucide-react';
 import type { PvpRoomState } from '../../shared/types.js';
-import { getAuthToken } from '../utils/storage.js';
+import { PvpSocket, type PvpConnectionStatus } from '../utils/pvpSocket.js';
+import { clearActivePvpRoom, getAuthToken, setActivePvpRoom } from '../utils/storage.js';
 import { copyTextToClipboard } from '../utils/clipboard.js';
 
 interface PvpLobbyViewProps {
@@ -21,8 +22,9 @@ interface PvpLobbyViewProps {
   playerId: string;
   nickname: string;
   onBack: () => void;
-  onStartMatch: (roomState: PvpRoomState, ws: WebSocket) => void;
+  onStartMatch: (roomState: PvpRoomState, socket: PvpSocket) => void;
   initialRoomCode?: string;
+  autoJoin?: boolean;
 }
 
 export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
@@ -32,6 +34,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
   onBack,
   onStartMatch,
   initialRoomCode,
+  autoJoin = false,
 }) => {
   const [mode, setMode] = useState<'create' | 'join'>(initialRoomCode ? 'join' : 'create');
   const [roomCodeInput, setRoomCodeInput] = useState(initialRoomCode || '');
@@ -43,63 +46,99 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
 
   // Active connected room state
   const [currentRoom, setCurrentRoom] = useState<PvpRoomState | null>(null);
-  const [ws, setWs] = useState<WebSocket | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
   const [countdownNum, setCountdownNum] = useState<number | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<PvpConnectionStatus>('idle');
+  const [connectionMessage, setConnectionMessage] = useState<string | undefined>(undefined);
+
+  const socketRef = useRef<PvpSocket | null>(null);
+  const handedOffRef = useRef(false);
+  const onStartMatchRef = useRef(onStartMatch);
+
+  const getSocket = (): PvpSocket => {
+    if (!socketRef.current) {
+      socketRef.current = new PvpSocket(playerId);
+    }
+    return socketRef.current;
+  };
+
+  useEffect(() => {
+    onStartMatchRef.current = onStartMatch;
+  }, [onStartMatch]);
 
   useEffect(() => {
     fetchYears();
   }, []);
 
+  // Own the resilient websocket. It survives the hand-off to the live match view
+  // (handedOffRef), and is closed when the player leaves the lobby for good.
   useEffect(() => {
-    if (initialRoomCode) {
-      setMode('join');
-      setRoomCodeInput(initialRoomCode.toUpperCase().trim());
-    }
-  }, [initialRoomCode]);
+    const socket = getSocket();
 
-  // Keep WebSocket alive with ping every 20 seconds
-  useEffect(() => {
-    if (!ws) return;
-    const pingTimer = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'ping' }));
-      }
-    }, 20000);
-    return () => clearInterval(pingTimer);
-  }, [ws]);
-
-  // Auto-reconnect when switching back to this tab/app (e.g. from WeChat)
-  useEffect(() => {
-    const handleReactivate = () => {
-      if (document.visibilityState === 'visible' && currentRoom) {
-        if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-          console.log('[PVP] Re-establishing connection upon reactivation...');
-          connectWebSocket()
-            .then((newWs) => {
-              setWs(newWs);
-              newWs.send(
-                JSON.stringify({
-                  type: 'room:reconnect',
-                  payload: { roomCode: currentRoom.roomCode },
-                })
-              );
-            })
-            .catch((err) => {
-              console.error('Reconnect failed:', err);
-            });
+    const unsubscribeMessage = socket.subscribe((msg) => {
+      switch (msg.type) {
+        case 'room:state': {
+          const room = msg.payload as PvpRoomState;
+          setCurrentRoom(room);
+          setLoading(false);
+          setError(null);
+          if (room.status === 'IN_PROGRESS' || room.status === 'FINISHED') {
+            handedOffRef.current = true;
+            setActivePvpRoom(room.roomCode);
+            onStartMatchRef.current(room, socket);
+          }
+          break;
         }
+        case 'room:countdown':
+          setCountdownNum(msg.payload?.secondsRemaining ?? null);
+          break;
+        case 'error':
+          if (msg.payload?.code === 'ROOM_NOT_FOUND') {
+            clearActivePvpRoom();
+          }
+          setError(msg.payload?.message || '操作失败');
+          setLoading(false);
+          break;
+        case 'pong':
+          // Heartbeat acknowledged
+          break;
+      }
+    });
+
+    const unsubscribeStatus = socket.onStatus((status, detail) => {
+      setConnectionStatus(status);
+      setConnectionMessage(detail.message);
+    });
+
+    return () => {
+      unsubscribeMessage();
+      unsubscribeStatus();
+      if (!handedOffRef.current) {
+        socket.close();
+        socketRef.current = null;
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playerId]);
 
-    document.addEventListener('visibilitychange', handleReactivate);
-    window.addEventListener('online', handleReactivate);
-    return () => {
-      document.removeEventListener('visibilitychange', handleReactivate);
-      window.removeEventListener('online', handleReactivate);
-    };
-  }, [currentRoom, ws]);
+  useEffect(() => {
+    if (!initialRoomCode) return;
+    const code = initialRoomCode.toUpperCase().trim();
+    setMode('join');
+    setRoomCodeInput(code);
+    if (!autoJoin) return;
+
+    // The player was already in this match before an interruption: reconnect and
+    // re-enter it, preserving every answer already stored on the server.
+    console.log(`[PVP] Auto-resuming interrupted match in room ${code}`);
+    setLoading(true);
+    const socket = getSocket();
+    socket.setRoomCode(code);
+    socket.connect(code);
+    socket.send({ type: 'room:join', payload: { roomCode: code, nickname } });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialRoomCode, autoJoin]);
 
   const fetchYears = async () => {
     try {
@@ -116,85 +155,22 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
     }
   };
 
-  const connectWebSocket = (): Promise<WebSocket> => {
-    return new Promise((resolve, reject) => {
-      const token = getAuthToken();
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/ws?token=${token}&playerId=${playerId}`;
-      const socket = new WebSocket(wsUrl);
-
-      socket.onopen = () => {
-        resolve(socket);
-      };
-
-      socket.onerror = (err) => {
-        reject(err);
-      };
-
-      socket.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          handleWsMessage(msg, socket);
-        } catch (err) {
-          console.error('Invalid message from server:', err);
-        }
-      };
-
-      socket.onclose = () => {
-        console.log('WS connection closed');
-      };
+  const handleCreateRoom = () => {
+    setError(null);
+    setLoading(true);
+    const socket = getSocket();
+    socket.connect();
+    socket.send({
+      type: 'room:create',
+      payload: {
+        nickname,
+        year: selectedYear,
+        durationMinutes,
+      },
     });
   };
 
-  const handleWsMessage = (msg: { type: string; payload?: any }, activeSocket: WebSocket) => {
-    switch (msg.type) {
-      case 'room:state':
-        setCurrentRoom(msg.payload);
-        setLoading(false);
-        setError(null);
-        if (msg.payload.status === 'IN_PROGRESS') {
-          onStartMatch(msg.payload, activeSocket);
-        }
-        break;
-      case 'room:countdown':
-        setCountdownNum(msg.payload.secondsRemaining);
-        break;
-      case 'error':
-        setError(msg.payload.message || '操作失败');
-        setLoading(false);
-        break;
-      case 'pong':
-        // Heartbeat acknowledged
-        break;
-    }
-  };
-
-  const handleCreateRoom = async () => {
-    setError(null);
-    setLoading(true);
-    try {
-      let socket = ws;
-      if (!socket || socket.readyState !== WebSocket.OPEN) {
-        socket = await connectWebSocket();
-        setWs(socket);
-      }
-      socket.send(
-        JSON.stringify({
-          type: 'room:create',
-          payload: {
-            nickname,
-            year: selectedYear,
-            durationMinutes,
-          },
-        })
-      );
-    } catch {
-      setError('无法连接对战服务器，请检查网络或重新登录');
-      setLoading(false);
-    }
-  };
-
-  const handleJoinRoom = async () => {
+  const handleJoinRoom = () => {
     const code = roomCodeInput.trim().toUpperCase();
     if (!code) {
       setError('请输入6位房间码');
@@ -202,31 +178,20 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
     }
     setError(null);
     setLoading(true);
-    try {
-      let socket = ws;
-      if (!socket || socket.readyState !== WebSocket.OPEN) {
-        socket = await connectWebSocket();
-        setWs(socket);
-      }
-      socket.send(
-        JSON.stringify({
-          type: 'room:join',
-          payload: {
-            roomCode: code,
-            nickname,
-          },
-        })
-      );
-    } catch {
-      setError('无法连接对战服务器，请检查网络或重新登录');
-      setLoading(false);
-    }
+    const socket = getSocket();
+    socket.setRoomCode(code);
+    socket.connect(code);
+    socket.send({
+      type: 'room:join',
+      payload: {
+        roomCode: code,
+        nickname,
+      },
+    });
   };
 
   const handleToggleReady = () => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'room:toggle_ready' }));
-    }
+    getSocket().send({ type: 'room:toggle_ready' });
   };
 
   const handleCopyLink = async () => {
@@ -261,13 +226,16 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
   };
 
   const handleLeaveRoom = () => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'room:leave' }));
-      ws.close();
-      setWs(null);
+    const socket = socketRef.current;
+    if (socket) {
+      socket.send({ type: 'room:leave' });
+      socket.close();
+      socketRef.current = null;
     }
+    clearActivePvpRoom();
     setCurrentRoom(null);
     setCountdownNum(null);
+    setConnectionStatus('idle');
   };
 
   // --- WAITING ROOM SCREEN ---
@@ -291,6 +259,14 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
             <div className="font-mono text-xs text-zinc-400 mt-6 uppercase">
               双方请就位，作答立即开启
             </div>
+          </div>
+        )}
+
+        {/* Connection status banner */}
+        {connectionStatus !== 'open' && connectionStatus !== 'idle' && (
+          <div className="p-3 border-2 border-amber-400 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200 font-mono text-xs flex items-center gap-2">
+            <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+            <span>{connectionMessage || '正在连接对战服务器...'}</span>
           </div>
         )}
 
@@ -522,6 +498,13 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
             输入房间码加入
           </button>
         </div>
+
+        {connectionStatus !== 'open' && connectionStatus !== 'idle' && (
+          <div className="p-3 border-2 border-amber-400 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200 font-mono text-xs flex items-center gap-2">
+            <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+            <span>{connectionMessage || '正在连接对战服务器...'}</span>
+          </div>
+        )}
 
         {error && (
           <div className="p-3 bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-900 text-red-700 dark:text-red-300 text-xs font-mono">

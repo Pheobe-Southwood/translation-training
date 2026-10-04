@@ -16,8 +16,11 @@ import {
   setPlayerNickname,
   getStoredTheme,
   setStoredTheme,
+  clearActivePvpRoom,
+  getActivePvpRoom,
   type AppTheme,
 } from './utils/storage.js';
+import type { PvpSocket } from './utils/pvpSocket.js';
 
 export const App: React.FC = () => {
   const [theme, setTheme] = useState<AppTheme>(() => getStoredTheme());
@@ -33,9 +36,10 @@ export const App: React.FC = () => {
   // PVP Active State
   const [pvpState, setPvpState] = useState<{
     roomState: PvpRoomState;
-    ws: WebSocket;
+    socket: PvpSocket;
   } | null>(null);
   const [initialRoomCode, setInitialRoomCode] = useState<string | undefined>();
+  const [autoJoinRoom, setAutoJoinRoom] = useState(false);
 
   // Check auth on mount
   useEffect(() => {
@@ -45,11 +49,27 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('hashchange', parseHashRoute);
   }, []);
 
+  // Resume a match that was interrupted by a refresh / app switch. The room code is
+  // persisted when a match starts and cleared when it truly ends.
+  useEffect(() => {
+    if (isAuthenticated !== true || currentView !== 'home') return;
+    if (window.location.hash.match(/#\/pvp\/[A-Za-z0-9]+/)) return;
+    const activeRoom = getActivePvpRoom();
+    if (!activeRoom) return;
+    console.log(`[PVP] Resuming interrupted match in room ${activeRoom}`);
+    setInitialRoomCode(activeRoom);
+    setAutoJoinRoom(true);
+    setCurrentView('pvp-lobby');
+    // Intentionally only reacts to auth resolution; navigation changes must not re-trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated]);
+
   const parseHashRoute = () => {
     const hash = window.location.hash;
     const match = hash.match(/#\/pvp\/([A-Za-z0-9]+)/);
     if (match && match[1]) {
       setInitialRoomCode(match[1].toUpperCase());
+      setAutoJoinRoom(false);
       setCurrentView('pvp-lobby');
     }
   };
@@ -97,6 +117,12 @@ export const App: React.FC = () => {
   };
 
   const handleLogout = () => {
+    if (pvpState?.socket) {
+      pvpState.socket.close();
+    }
+    clearActivePvpRoom();
+    setPvpState(null);
+    setCurrentView('home');
     removeAuthToken();
     setCurrentUser(null);
     setIsAuthenticated(false);
@@ -139,18 +165,20 @@ export const App: React.FC = () => {
   const handleEnterPvpLobby = (year: number) => {
     setSelectedYear(year);
     setInitialRoomCode(undefined);
+    setAutoJoinRoom(false);
     setCurrentView('pvp-lobby');
   };
 
-  const handleStartMatch = (roomState: PvpRoomState, ws: WebSocket) => {
-    setPvpState({ roomState, ws });
+  const handleStartMatch = (roomState: PvpRoomState, socket: PvpSocket) => {
+    setPvpState({ roomState, socket });
     setCurrentView('pvp-match');
   };
 
   const handleExitMatch = () => {
-    if (pvpState?.ws) {
-      pvpState.ws.close();
+    if (pvpState?.socket) {
+      pvpState.socket.close();
     }
+    clearActivePvpRoom();
     setPvpState(null);
     setCurrentView('home');
   };
@@ -201,6 +229,7 @@ export const App: React.FC = () => {
             playerId={playerId}
             nickname={nickname}
             initialRoomCode={initialRoomCode}
+            autoJoin={autoJoinRoom}
             onBack={() => setCurrentView('home')}
             onStartMatch={handleStartMatch}
           />
@@ -209,7 +238,7 @@ export const App: React.FC = () => {
         {currentView === 'pvp-match' && pvpState && (
           <PvpMatchView
             initialRoomState={pvpState.roomState}
-            ws={pvpState.ws}
+            socket={pvpState.socket}
             playerId={playerId}
             onExit={handleExitMatch}
             theme={theme}

@@ -19,11 +19,19 @@ import type { PvpRoomState, HistorySessionRecord, SegmentSubmission } from '../.
 import { PvpHud } from '../components/PvpHud.js';
 import { GradingCard } from '../components/GradingCard.js';
 import { playSuccessSound } from '../utils/sound.js';
-import { saveHistoryRecord, getAuthToken } from '../utils/storage.js';
+import {
+  saveHistoryRecord,
+  getAuthToken,
+  clearActivePvpRoom,
+  clearPvpDraft,
+  getPvpDraft,
+  setPvpDraft,
+} from '../utils/storage.js';
+import { PvpSocket, type PvpConnectionStatus } from '../utils/pvpSocket.js';
 
 interface PvpMatchViewProps {
   initialRoomState: PvpRoomState;
-  ws: WebSocket;
+  socket: PvpSocket;
   playerId: string;
   onExit: () => void;
   theme?: 'light' | 'dark';
@@ -32,7 +40,7 @@ interface PvpMatchViewProps {
 
 export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
   initialRoomState,
-  ws,
+  socket,
   playerId,
   onExit,
   theme,
@@ -48,15 +56,25 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
   });
   const [activeCardTab, setActiveCardTab] = useState<number | null>(null);
   const [isPassageOpenMobile, setIsPassageOpenMobile] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<PvpConnectionStatus>(() => socket.getStatus());
+  const [connectionMessage, setConnectionMessage] = useState<string | undefined>(() => socket.getStatusMessage());
+  const [submitNotice, setSubmitNotice] = useState<string | null>(null);
 
   const hasPersistedRef = useRef<boolean>(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Segment indices already accepted by the server (or in-flight), used to prevent
+  // double submits and to decide when the local textarea may be cleared.
+  const submittedIndicesRef = useRef<Set<number>>(new Set());
+  // Submission that could not be delivered (socket down); retried once reconnected.
+  const pendingSubmissionRef = useRef<{ segmentIndex: number; answer: string } | null>(null);
+  // Last segment handed to the socket, used to clear the input only once the server
+  // has authoritatively accepted it.
+  const lastSubmittedRef = useRef<{ index: number; answer: string } | null>(null);
 
   // Sync WebSocket messages
   useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
+    const unsubscribeMessage = socket.subscribe((msg) => {
       try {
-        const msg = JSON.parse(event.data);
         if (msg.type === 'room:state') {
           setRoomState(msg.payload);
         } else if (msg.type === 'segment:paired_graded' || msg.type === 'segment:graded') {
@@ -64,17 +82,26 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
         } else if (msg.type === 'match:ended') {
           setRoomState(msg.payload.roomState);
           handleMatchSettled(msg.payload.roomState);
+        } else if (msg.type === 'error') {
+          // e.g. NOT_IN_PROGRESS / ALREADY_FINISHED / INVALID_SEGMENT from the server
+          setSubmitNotice(msg.payload?.message || '操作失败，请重试');
         }
       } catch (err) {
         console.error(err);
       }
-    };
+    });
 
-    ws.addEventListener('message', handleMessage);
+    const unsubscribeStatus = socket.onStatus((status, detail) => {
+      setConnectionStatus(status);
+      setConnectionMessage(detail.message);
+    });
+
     return () => {
-      ws.removeEventListener('message', handleMessage);
+      unsubscribeMessage();
+      unsubscribeStatus();
     };
-  }, [ws]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [socket]);
 
   // Match countdown clock ticker
   useEffect(() => {
@@ -104,6 +131,71 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
       textareaRef.current.focus();
     }
   }, [currentIdx]);
+
+  // Restore an unsent translation for the current question (lost to a dropped socket
+  // or restored after a refresh), so the player never has to retype it blind.
+  useEffect(() => {
+    if (roomState.status === 'FINISHED') return;
+    const draft = getPvpDraft();
+    if (draft && draft.roomCode === roomState.roomCode && draft.segmentIndex === currentIdx) {
+      setCurrentAnswer((prev) => (prev.trim() ? prev : draft.answer));
+      setSubmitNotice('已恢复你上次未提交的译文，请重新点击提交');
+    }
+  }, [currentIdx, roomState.roomCode, roomState.status]);
+
+  // Re-send a submission that could not be delivered while the socket was down.
+  useEffect(() => {
+    if (connectionStatus !== 'open') return;
+    const pending = pendingSubmissionRef.current;
+    if (!pending) return;
+    pendingSubmissionRef.current = null;
+    const ok = socket.send({ type: 'segment:submit', payload: pending });
+    if (ok) {
+      console.log(`[PVP] Retried pending submission for segment ${pending.segmentIndex + 1} after reconnect`);
+      clearPvpDraft();
+      // Do not clear the textarea here: the authoritative room:state decides that.
+    } else {
+      pendingSubmissionRef.current = pending;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectionStatus]);
+
+  // The server is the source of truth: once an authoritative room:state confirms the
+  // submitted segment, drop the local copy and clear the input. This also covers a
+  // submission that was queued while the socket was down and delivered after reconnect.
+  useEffect(() => {
+    const last = lastSubmittedRef.current;
+    if (!last) return;
+    const sub = myPlayer?.submissions[last.index];
+    if (!sub?.submittedAt) return;
+
+    submittedIndicesRef.current.add(last.index);
+    pendingSubmissionRef.current = null;
+    clearPvpDraft();
+    if (currentAnswer === last.answer) {
+      setCurrentAnswer('');
+    }
+    if (submitNotice) {
+      setSubmitNotice(null);
+    }
+  }, [myPlayer, currentAnswer, submitNotice]);
+
+  // Remember segments the server already has so a stale click cannot re-send them
+  // (the server also ignores duplicate submissions).
+  useEffect(() => {
+    if (!myPlayer) return;
+    for (const key of Object.keys(myPlayer.submissions)) {
+      submittedIndicesRef.current.add(Number(key));
+    }
+  }, [myPlayer]);
+
+  // Clear the persisted "active room" once the match is truly over.
+  useEffect(() => {
+    if (roomState.status === 'FINISHED') {
+      clearActivePvpRoom();
+      clearPvpDraft();
+    }
+  }, [roomState.status]);
 
   const handleMatchSettled = (finalState: PvpRoomState) => {
     const me = finalState.players[playerId];
@@ -184,19 +276,42 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
   };
 
   const handleConfirmSubmit = () => {
-    if (!currentAnswer.trim() || myPlayer.isFinished) return;
+    const answer = currentAnswer.trim();
+    if (!answer || myPlayer.isFinished) return;
+    if (roomState.status !== 'IN_PROGRESS') return;
 
-    ws.send(
-      JSON.stringify({
-        type: 'segment:submit',
-        payload: {
-          segmentIndex: currentIdx,
-          studentAnswer: currentAnswer.trim(),
-        },
-      })
-    );
+    // Never re-send a segment the server already has.
+    if (submittedIndicesRef.current.has(currentIdx) || pendingSubmissionRef.current?.segmentIndex === currentIdx) {
+      setSubmitNotice(`第 ${currentIdx + 1} 题已提交，正在等待评分…`);
+      return;
+    }
 
-    setCurrentAnswer('');
+    lastSubmittedRef.current = { index: currentIdx, answer };
+    const delivered = socket.send({
+      type: 'segment:submit',
+      payload: {
+        segmentIndex: currentIdx,
+        studentAnswer: answer,
+      },
+    });
+
+    if (delivered) {
+      // Clear immediately only because the payload is confirmed handed to an open socket.
+      setCurrentAnswer('');
+      clearPvpDraft();
+      setSubmitNotice(null);
+      return;
+    }
+
+    // Socket is down: keep the text, persist a draft, and auto-retry after reconnect.
+    pendingSubmissionRef.current = { segmentIndex: currentIdx, answer };
+    setPvpDraft({
+      roomCode: roomState.roomCode,
+      segmentIndex: currentIdx,
+      answer,
+      updatedAt: Date.now(),
+    });
+    setSubmitNotice('网络连接已断开，正在自动重连；你的译文已保留，连接恢复后会自动重新提交');
   };
 
   const renderPassageWithHighlight = (passage: string, activeSentence: string) => {
@@ -422,6 +537,41 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
       />
 
       <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-3 sm:py-6 space-y-4 sm:space-y-6">
+        {/* Connection status banner: never let the player submit into a dead socket silently */}
+        {connectionStatus !== 'open' && connectionStatus !== 'idle' && (
+          <div
+            className={`p-3 border-2 font-mono text-xs flex items-center gap-2 ${
+              connectionStatus === 'fatal'
+                ? 'border-red-500 bg-red-50 dark:bg-red-950/40 text-red-800 dark:text-red-200'
+                : 'border-amber-400 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200'
+            }`}
+          >
+            {connectionStatus === 'fatal' ? (
+              <Clock className="w-4 h-4 shrink-0" />
+            ) : (
+              <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+            )}
+            <span className="font-bold">
+              {connectionMessage ||
+                (connectionStatus === 'connecting' ? '正在连接对战服务器...' : '连接已断开，正在自动重连...')}
+            </span>
+            {connectionStatus === 'fatal' && (
+              <button
+                onClick={onExit}
+                className="ml-auto px-3 py-1 border border-red-500 text-red-800 dark:text-red-200 hover:bg-red-100 dark:hover:bg-red-900/40 font-bold uppercase shrink-0"
+              >
+                返回大厅
+              </button>
+            )}
+          </div>
+        )}
+
+        {submitNotice && (
+          <div className="p-3 border-2 border-blue-400 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/40 text-blue-900 dark:text-blue-200 font-mono text-xs">
+            {submitNotice}
+          </div>
+        )}
+
         {!myPlayer.isFinished ? (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 sm:gap-6 items-start">
             {/* Active Target Sentence & Input Box (Desktop Right 5 cols, Mobile TOP 12 cols) */}
@@ -468,7 +618,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
 
                 <button
                   onClick={handleConfirmSubmit}
-                  disabled={!currentAnswer.trim()}
+                  disabled={!currentAnswer.trim() || connectionStatus === 'fatal'}
                   className="w-full min-h-[48px] py-3.5 bg-swiss-black hover:bg-swiss-red dark:bg-zinc-100 dark:text-swiss-black dark:hover:bg-swiss-red dark:hover:text-white text-white font-mono text-xs font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-2 disabled:opacity-40 disabled:hover:bg-swiss-black dark:disabled:hover:bg-zinc-100 active:scale-[0.99]"
                 >
                   <span>
@@ -485,8 +635,16 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                   <Swords className="w-4 h-4 text-zinc-500 dark:text-zinc-400" />
                   <span className="font-bold text-zinc-700 dark:text-zinc-300">{opponent?.nickname || '对手'} 进度：</span>
                 </div>
-                <span className="bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 font-bold text-zinc-800 dark:text-zinc-200">
-                  {opponent?.isFinished
+                <span
+                  className={`px-2 py-0.5 font-bold ${
+                    opponent && opponent.isOnline === false
+                      ? 'bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300'
+                      : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200'
+                  }`}
+                >
+                  {opponent && opponent.isOnline === false
+                    ? '连接已断开，等待重连…'
+                    : opponent?.isFinished
                     ? '已答完全部5题'
                     : `正在作答第 ${(opponent?.currentSegmentIndex || 0) + 1} 题`}
                 </span>
