@@ -38,8 +38,6 @@ export function clearActivePvpRoom(): void {
 
 export interface PvpDraft {
   roomCode: string;
-  /** Round the draft belongs to. Round-scoped, or round 2 would overwrite round 1. */
-  roundIndex: number;
   segmentIndex: number;
   answer: string;
   updatedAt: number;

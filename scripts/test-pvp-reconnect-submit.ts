@@ -25,16 +25,6 @@ import { spawn } from 'child_process';
 import { WebSocket } from 'ws';
 import { generateUserToken } from '../src/server/auth.js';
 
-// --- multi-round protocol helpers -------------------------------------------------
-const findPlayer = (payload: any, id: string) =>
-  (payload?.players || []).find((p: any) => p.playerId === id);
-const findSpectator = (payload: any, id: string) =>
-  (payload?.spectators || []).find((s: any) => s.playerId === id);
-const playerCount = (payload: any) => (payload?.players || []).length;
-const isSummary = (msg: any) => msg?.type === 'room:summary';
-// ---------------------------------------------------------------------------------
-
-
 const PORT = 8893;
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 const WS_BASE = `ws://127.0.0.1:${PORT}/ws`;
@@ -57,19 +47,6 @@ function connect(playerId: string): Promise<WebSocket> {
     ws.on('open', () => resolve(ws));
     ws.on('error', reject);
     setTimeout(() => reject(new Error(`Timed out connecting socket for ${playerId}`)), 5000);
-  });
-}
-
-/** Latest round:detail / room:summary seen on ANY socket (replaced the room snapshot). */
-let latestDetail: any = null;
-let latestSummary: any = null;
-function trackDetail(ws: WebSocket) {
-  ws.on('message', (raw: any) => {
-    try {
-      const msg = JSON.parse(raw.toString());
-      if (msg?.type === 'round:detail') latestDetail = msg.payload;
-      if (msg?.type === 'room:summary') latestSummary = msg.payload;
-    } catch {}
   });
 }
 
@@ -114,7 +91,7 @@ function waitForMessage(
   });
 }
 
-const isRoomState = (msg: any) => msg?.type === 'room:summary';
+const isRoomState = (msg: any) => msg?.type === 'room:state';
 
 async function run() {
   console.log(`=== Starting test server on port ${PORT} ===`);
@@ -164,7 +141,6 @@ async function run() {
     // --- Setup: create room, join, ready up, start match -------------------
     console.log('--- Setup: room + match start ---');
     hostWs = await connect(hostId);
-    trackDetail(hostWs);
     const createReply = await waitForMessage(
       hostWs,
       (m) => isRoomState(m) && !!m.payload?.roomCode,
@@ -179,10 +155,9 @@ async function run() {
     console.log(`Room code: ${roomCode}`);
 
     guestWs = await connect(guestId);
-    trackDetail(guestWs);
     await waitForMessage(
       guestWs,
-      (m) => isRoomState(m) && !!findPlayer(m.payload, guestId),
+      (m) => isRoomState(m) && !!m.payload?.players?.[guestId],
       'guest join',
       6000,
       () =>
@@ -205,68 +180,62 @@ async function run() {
     console.log('--- T1: submit advances currentSegmentIndex ---');
     const t1 = await waitForMessage(
       guestWs,
-      (m) => isRoomState(m) && findPlayer(m.payload, guestId)?.currentSegmentIndex === 1,
+      (m) => isRoomState(m) && m.payload?.players?.[guestId]?.submissions?.[0]?.studentAnswer === '第一题答案',
       'segment 1 accepted',
       6000,
       () =>
         guestWs!.send(
-          JSON.stringify({ type: 'segment:submit', payload: { roundIndex: 0, segmentIndex: 0, studentAnswer: '第一题答案' } })
+          JSON.stringify({ type: 'segment:submit', payload: { segmentIndex: 0, studentAnswer: '第一题答案' } })
         )
     );
-    assert(findPlayer(t1.payload, guestId).currentSegmentIndex === 1, 'currentSegmentIndex advanced 0 -> 1');
-    const d1 = await waitForMessage(
-      guestWs,
-      (m) => m?.type === 'round:detail' && m.payload?.players?.some(
-        (p: any) => p.playerId === guestId && p.submissions?.[0]?.studentAnswer === '第一题答案'
-      ),
-      'round detail carries the accepted answer',
-      6000
-    );
+    assert(t1.payload.players[guestId].currentSegmentIndex === 1, 'currentSegmentIndex advanced 0 -> 1');
+    assert(t1.payload.players[guestId].submissions[0].gradingStatus === 'waiting_pair', 'submission stored as waiting_pair');
     assert(
-      d1.payload.players.find((p: any) => p.playerId === guestId).submissions[0] !== undefined,
-      'submission stored and exposed through round:detail'
-    );
-    assert(
-      serverLog.some((l) => l.includes('submitted by') && l.includes(roomCode)),
+      serverLog.some((l) => l.includes('Segment 1 submitted by') && l.includes(roomCode)),
       'server logged the accepted submission (diagnosability for future incidents)'
     );
 
     // --- T5: duplicate submit is idempotent --------------------------------
     console.log('\n--- T5: duplicate submit is idempotent ---');
-    const firstSubmittedAt = d1.payload.players.find((p: any) => p.playerId === guestId).submissions[0].submittedAt;
-    guestWs!.send(
-      JSON.stringify({ type: 'segment:submit', payload: { roundIndex: 0, segmentIndex: 0, studentAnswer: '篡改后的答案' } })
+    const firstSubmittedAt = t1.payload.players[guestId].submissions[0].submittedAt;
+    const t5 = await waitForMessage(
+      guestWs,
+      (m) => isRoomState(m) && m.payload?.players?.[guestId]?.submissions?.[0]?.studentAnswer === '第一题答案',
+      'duplicate submit echo',
+      6000,
+      () =>
+        guestWs!.send(
+          JSON.stringify({ type: 'segment:submit', payload: { segmentIndex: 0, studentAnswer: '篡改后的答案' } })
+        )
     );
-    await wait(600);
-    const dupDetail = latestDetail;
-    const dupSub = dupDetail?.players?.find((p: any) => p.playerId === guestId)?.submissions?.[0];
-    assert(dupSub?.studentAnswer === '第一题答案', 'original answer was NOT overwritten');
-    assert(dupSub?.submittedAt === firstSubmittedAt, 'submittedAt unchanged (no re-grade triggered)');
+    assert(t5.payload.players[guestId].submissions[0].studentAnswer === '第一题答案', 'original answer was NOT overwritten');
     assert(
-      findPlayer(latestSummary, guestId)?.currentSegmentIndex === 1,
-      'index did not jump on duplicate submit'
+      t5.payload.players[guestId].submissions[0].submittedAt === firstSubmittedAt,
+      'submittedAt unchanged (no re-grade triggered)'
     );
+    assert(t5.payload.players[guestId].currentSegmentIndex === 1, 'index did not jump on duplicate submit');
 
     // --- T2: stale socket close must not unregister the live socket --------
     console.log('\n--- T2: late close from a replaced socket is ignored ---');
     hostWs2 = await connect(hostId);
-    trackDetail(hostWs2);
-    await wait(300); // let the server register the replacement socket
+    await wait(
+      300
+    ); // let the server register the replacement socket (it also auto-broadcasts state)
     closeSocket(hostWs);
     hostWs = undefined;
     await wait(500); // give the server time to process the stale close event
     const t2 = await waitForMessage(
       hostWs2,
-      (m) => isRoomState(m) && findPlayer(m.payload, guestId)?.currentSegmentIndex === 2,
+      (m) => isRoomState(m) && !!m.payload?.players?.[guestId]?.submissions?.[1],
       'broadcast on the replacement socket',
       6000,
       () =>
         guestWs!.send(
-          JSON.stringify({ type: 'segment:submit', payload: { roundIndex: 0, segmentIndex: 1, studentAnswer: '第二题答案' } })
+          JSON.stringify({ type: 'segment:submit', payload: { segmentIndex: 1, studentAnswer: '第二题答案' } })
         )
     );
     assert(
-      findPlayer(t2.payload, guestId).currentSegmentIndex === 2,
+      t2.payload.players[guestId].currentSegmentIndex === 2,
       'replacement socket still receives authoritative broadcasts after the old socket closed'
     );
     assert(
@@ -277,43 +246,28 @@ async function run() {
     // --- T3: reconnect preserves progress ---------------------------------
     console.log('\n--- T3: reconnect preserves progress ---');
     guestWs2 = await connect(guestId);
-    trackDetail(guestWs2);
     const t3 = await waitForMessage(
       guestWs2,
-      (m) => isRoomState(m) && !!findPlayer(m.payload, guestId),
-      'reconnect summary',
+      (m) => isRoomState(m) && !!m.payload?.players?.[guestId],
+      'reconnect state',
       6000
     );
-    const recovered = findPlayer(t3.payload, guestId);
+    const recovered = t3.payload.players[guestId];
     assert(recovered.currentSegmentIndex === 2, 'currentSegmentIndex preserved (2) on reconnect');
-    const recoveredDetail = await waitForMessage(
-      guestWs2,
-      (m) =>
-        m?.type === 'round:detail' &&
-        m.payload?.players?.some(
-          (p: any) =>
-            p.playerId === guestId &&
-            p.submissions?.[0]?.studentAnswer === '第一题答案' &&
-            p.submissions?.[1]?.studentAnswer === '第二题答案'
-        ),
-      'reconnect round detail',
-      6000
-    );
-    const rp = recoveredDetail.payload.players.find((p: any) => p.playerId === guestId);
-    assert(rp.submissions[0]?.studentAnswer === '第一题答案', 'segment 1 answer preserved on reconnect');
-    assert(rp.submissions[1]?.studentAnswer === '第二题答案', 'segment 2 answer preserved on reconnect');
+    assert(recovered.submissions[0]?.studentAnswer === '第一题答案', 'segment 1 answer preserved on reconnect');
+    assert(recovered.submissions[1]?.studentAnswer === '第二题答案', 'segment 2 answer preserved on reconnect');
 
     // --- T4: existing participant may re-join an IN_PROGRESS room ---------
     console.log('\n--- T4: re-join IN_PROGRESS room as existing participant ---');
     const t4 = await waitForMessage(
       guestWs2,
-      (m) => isRoomState(m) && !!findPlayer(m.payload, guestId),
+      (m) => isRoomState(m) && !!m.payload?.players?.[guestId],
       'room:join during IN_PROGRESS',
       6000,
       () => guestWs2!.send(JSON.stringify({ type: 'room:join', payload: { roomCode, nickname: '挑战者测试' } }))
     );
     assert(t4.payload.status === 'IN_PROGRESS', 're-join accepted while match is running');
-    assert(findPlayer(t4.payload, guestId).currentSegmentIndex === 2, 're-join did not reset progress');
+    assert(t4.payload.players[guestId].currentSegmentIndex === 2, 're-join did not reset progress');
 
     // --- T6: invalid segment index is rejected -----------------------------
     console.log('\n--- T6: invalid segment index rejected ---');
@@ -322,7 +276,7 @@ async function run() {
       (m) => m?.type === 'error' && m.payload?.code === 'INVALID_SEGMENT',
       'INVALID_SEGMENT error',
       6000,
-      () => guestWs2!.send(JSON.stringify({ type: 'segment:submit', payload: { roundIndex: 0, segmentIndex: 99, studentAnswer: 'x' } }))
+      () => guestWs2!.send(JSON.stringify({ type: 'segment:submit', payload: { segmentIndex: 99, studentAnswer: 'x' } }))
     );
     assert(t6.payload.code === 'INVALID_SEGMENT', 'out-of-range index rejected with explicit error code');
 
