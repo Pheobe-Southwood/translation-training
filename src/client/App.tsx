@@ -39,6 +39,7 @@ export const App: React.FC = () => {
     socket: PvpSocket;
   } | null>(null);
   const [initialRoomCode, setInitialRoomCode] = useState<string | undefined>();
+  const [initialSpectate, setInitialSpectate] = useState<boolean>(false);
   const [autoJoinRoom, setAutoJoinRoom] = useState(false);
 
   // Check auth on mount
@@ -58,6 +59,7 @@ export const App: React.FC = () => {
     if (!activeRoom) return;
     console.log(`[PVP] Resuming interrupted match in room ${activeRoom}`);
     setInitialRoomCode(activeRoom);
+    setInitialSpectate(false);
     setAutoJoinRoom(true);
     setCurrentView('pvp-lobby');
     // Intentionally only reacts to auth resolution; navigation changes must not re-trigger.
@@ -69,6 +71,7 @@ export const App: React.FC = () => {
     const match = hash.match(/#\/pvp\/([A-Za-z0-9]+)/);
     if (match && match[1]) {
       setInitialRoomCode(match[1].toUpperCase());
+      setInitialSpectate(hash.includes('spectate=1') || hash.includes('spectate=true'));
       setAutoJoinRoom(false);
       setCurrentView('pvp-lobby');
     }
@@ -165,6 +168,7 @@ export const App: React.FC = () => {
   const handleEnterPvpLobby = (year: number) => {
     setSelectedYear(year);
     setInitialRoomCode(undefined);
+    setInitialSpectate(false);
     setAutoJoinRoom(false);
     setCurrentView('pvp-lobby');
   };
@@ -229,6 +233,7 @@ export const App: React.FC = () => {
             playerId={playerId}
             nickname={nickname}
             initialRoomCode={initialRoomCode}
+            initialSpectate={initialSpectate}
             autoJoin={autoJoinRoom}
             onBack={() => setCurrentView('home')}
             onStartMatch={handleStartMatch}

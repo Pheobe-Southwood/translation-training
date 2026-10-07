@@ -185,14 +185,20 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onBack }) => {
                               : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400'
                           }`}
                         >
-                          {rec.pvpDetails.outcome === 'win'
+                          {rec.pvpDetails.playerCount && rec.pvpDetails.playerCount > 2
+                            ? `RANK #${rec.pvpDetails.rank || 1} / ${rec.pvpDetails.playerCount}人局`
+                            : rec.pvpDetails.outcome === 'win'
                             ? 'VICTORY'
                             : rec.pvpDetails.outcome === 'draw'
                             ? 'DRAW'
                             : 'DEFEAT'}
                         </span>
                         <div className="text-[10px] text-zinc-500 dark:text-zinc-400 mt-0.5">
-                          VS {rec.pvpDetails.opponentNickname} ({rec.pvpDetails.opponentScore.toFixed(1)}分)
+                          {rec.pvpDetails.leaderboard && rec.pvpDetails.leaderboard.length > 2
+                            ? rec.pvpDetails.leaderboard
+                                .map((item) => `#${item.rank} ${item.nickname}(${item.score.toFixed(1)})`)
+                                .join(' · ')
+                            : `VS ${rec.pvpDetails.opponentNickname} (${rec.pvpDetails.opponentScore.toFixed(1)}分)`}
                         </div>
                       </div>
                     )}
