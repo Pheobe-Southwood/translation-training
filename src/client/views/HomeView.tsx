@@ -63,7 +63,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
         </h1>
 
         <p className="text-xs md:text-sm text-zinc-600 dark:text-zinc-400 font-mono leading-relaxed max-w-3xl">
-          收录 2002–2026 全年 25 套真题长难句 · 接入官方 DeepSeek 深度高推理阅卷 · 支持双人实时对战竞技
+          收录 2002–2026 全年 25 套真题长难句 · 接入官方 DeepSeek 深度高推理阅卷 · 支持 2–4 人实时对战与观战大屏
         </p>
       </div>
 
@@ -154,10 +154,10 @@ export const HomeView: React.FC<HomeViewProps> = ({
             </div>
 
             <h3 className="text-xl sm:text-2xl font-black uppercase tracking-tight text-swiss-black dark:text-zinc-100 mb-1.5">
-              PVP 双人对战竞技场
+              PVP 多人竞技与观战大屏
             </h3>
             <p className="text-xs font-mono text-zinc-600 dark:text-zinc-400 mb-5 leading-relaxed">
-              双人同题极速竞速，顶部单行 HUD 实时刷新比分，逐题由 DeepSeek 并列同题严格裁决。
+              支持 2–4 人自定义房间人数同题竞速，并开放实时观战位大屏，实时追踪全场选手作答内容与 AI 判分。
             </p>
 
             <button

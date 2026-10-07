@@ -2,7 +2,7 @@ import type { WebSocket } from 'ws';
 import type {
   PvpRoomState,
   PlayerState,
-  RoomStatus,
+  PlayerRanking,
   TranslationExam,
   SegmentSubmission,
   HistorySessionRecord,
@@ -15,6 +15,7 @@ interface ConnectedClient {
   ws: WebSocket;
   playerId: string;
   roomCode?: string;
+  isSpectator?: boolean;
 }
 
 class PvpManager {
@@ -44,19 +45,36 @@ class PvpManager {
     this.clients.set(playerId, { ws, playerId });
     this.playerSockets.set(playerId, ws);
 
-    // Check if player belongs to an existing active room (for auto-reconnect)
+    // Check if user belongs to an existing active room (for auto-reconnect)
     const existingRoom = this.findRoomByPlayerId(playerId);
     if (existingRoom && existingRoom.status !== 'FINISHED') {
       const player = existingRoom.players[playerId];
+      const spectator = existingRoom.spectators[playerId];
+
       if (player) {
         player.isOnline = true;
         player.lastActiveAt = Date.now();
         const client = this.clients.get(playerId);
-        if (client) client.roomCode = existingRoom.roomCode;
+        if (client) {
+          client.roomCode = existingRoom.roomCode;
+          client.isSpectator = false;
+        }
 
         console.log(
           `[PVP] Re-associated socket for player "${player.nickname}" (${playerId}) in room ${existingRoom.roomCode} ` +
             `(status=${existingRoom.status}, segment=${player.currentSegmentIndex + 1})`
+        );
+        this.broadcastRoomState(existingRoom.roomCode);
+      } else if (spectator) {
+        spectator.isOnline = true;
+        const client = this.clients.get(playerId);
+        if (client) {
+          client.roomCode = existingRoom.roomCode;
+          client.isSpectator = true;
+        }
+
+        console.log(
+          `[PVP] Re-associated socket for spectator "${spectator.nickname}" (${playerId}) in room ${existingRoom.roomCode}`
         );
         this.broadcastRoomState(existingRoom.roomCode);
       }
@@ -78,7 +96,7 @@ class PvpManager {
 
   private findRoomByPlayerId(playerId: string): PvpRoomState | undefined {
     for (const room of this.rooms.values()) {
-      if (room.players[playerId]) {
+      if (room.players[playerId] || room.spectators[playerId]) {
         return room;
       }
     }
@@ -103,6 +121,12 @@ class PvpManager {
         break;
       case 'room:toggle_ready':
         this.toggleReady(playerId);
+        break;
+      case 'room:switch_role':
+        this.switchRole(playerId, payload);
+        break;
+      case 'room:start_early':
+        this.startEarly(playerId);
         break;
       case 'segment:submit':
         this.submitSegment(playerId, payload);
@@ -132,7 +156,13 @@ class PvpManager {
 
   private createRoom(
     playerId: string,
-    payload: { nickname: string; year?: number; durationMinutes?: number }
+    payload: {
+      nickname: string;
+      year?: number;
+      durationMinutes?: number;
+      maxPlayers?: number;
+      allowSpectators?: boolean;
+    }
   ) {
     const code = this.generateRoomCode();
     const duration =
@@ -141,6 +171,11 @@ class PvpManager {
         (process.env.NODE_ENV === 'test' && payload.durationMinutes > 0))
         ? payload.durationMinutes
         : 15;
+
+    const maxPlayers = [2, 3, 4].includes(payload.maxPlayers as number)
+      ? (payload.maxPlayers as number)
+      : 2;
+    const allowSpectators = payload.allowSpectators !== false;
 
     let exam: TranslationExam | undefined;
     if (payload.year) {
@@ -169,21 +204,32 @@ class PvpManager {
       exam,
       durationMinutes: duration,
       status: 'WAITING',
+      maxPlayers,
+      allowSpectators,
       createdAt: Date.now(),
       players: {
         [playerId]: hostPlayer,
       },
+      spectators: {},
     };
 
     this.rooms.set(code, roomState);
     const client = this.clients.get(playerId);
-    if (client) client.roomCode = code;
+    if (client) {
+      client.roomCode = code;
+      client.isSpectator = false;
+    }
 
-    console.log(`[PVP] Created room ${code} by ${hostPlayer.nickname} (${playerId}), Year: ${exam.year}`);
+    console.log(
+      `[PVP] Created room ${code} (maxPlayers=${maxPlayers}, spectators=${allowSpectators}) by ${hostPlayer.nickname} (${playerId}), Year: ${exam.year}`
+    );
     this.broadcastRoomState(code);
   }
 
-  private joinRoom(playerId: string, payload: { roomCode: string; nickname: string }) {
+  private joinRoom(
+    playerId: string,
+    payload: { roomCode: string; nickname: string; asSpectator?: boolean }
+  ) {
     const code = (payload.roomCode || '').toUpperCase().trim();
     const room = this.rooms.get(code);
 
@@ -193,30 +239,164 @@ class PvpManager {
     }
 
     const existingPlayer = room.players[playerId];
+    const existingSpectator = room.spectators[playerId];
 
-    // Only brand-new challengers are blocked once a match is under way. A player
-    // who already belongs to the room may always come back (page refresh, network
-    // loss, app switch) WITHOUT losing their answers or their current question.
-    if (!existingPlayer && room.status !== 'WAITING' && room.status !== 'READY') {
-      return this.sendError(playerId, '对战已开始或已结束，无法加入', 'MATCH_ALREADY_STARTED');
-    }
-
-    if (!existingPlayer && Object.keys(room.players).length >= 2) {
-      return this.sendError(playerId, '房间已满（仅支持双人对战）', 'ROOM_FULL');
-    }
-
+    // Reconnecting / Rejoining participant
     if (existingPlayer) {
-      // Rejoining player: refresh presence only, never reset progress.
       existingPlayer.isOnline = true;
       existingPlayer.lastActiveAt = Date.now();
       if (payload.nickname) {
         existingPlayer.nickname = payload.nickname.trim().slice(0, 16);
       }
-    } else {
-      // New challenger player
+      const client = this.clients.get(playerId);
+      if (client) {
+        client.roomCode = code;
+        client.isSpectator = false;
+      }
+      this.broadcastRoomState(code);
+      return;
+    }
+
+    if (existingSpectator) {
+      existingSpectator.isOnline = true;
+      if (payload.nickname) {
+        existingSpectator.nickname = payload.nickname.trim().slice(0, 16);
+      }
+      const client = this.clients.get(playerId);
+      if (client) {
+        client.roomCode = code;
+        client.isSpectator = true;
+      }
+      this.broadcastRoomState(code);
+      return;
+    }
+
+    // Explicit request to join as spectator
+    if (payload.asSpectator) {
+      if (room.allowSpectators === false) {
+        return this.sendError(playerId, '该房间未开启观战功能', 'SPECTATING_NOT_ALLOWED');
+      }
+      const nickname = (payload.nickname || `观众${Object.keys(room.spectators).length + 1}`).trim().slice(0, 16);
+      room.spectators[playerId] = {
+        playerId,
+        nickname,
+        isOnline: true,
+        joinedAt: Date.now(),
+      };
+      const client = this.clients.get(playerId);
+      if (client) {
+        client.roomCode = code;
+        client.isSpectator = true;
+      }
+      console.log(`[PVP] Player ${nickname} (${playerId}) joined room ${code} as spectator.`);
+      this.broadcastRoomState(code);
+      return;
+    }
+
+    // Attempting to join as player
+    // If match is already in progress or finished:
+    if (room.status !== 'WAITING' && room.status !== 'READY') {
+      if (room.allowSpectators !== false) {
+        const nickname = (payload.nickname || `观众${Object.keys(room.spectators).length + 1}`).trim().slice(0, 16);
+        room.spectators[playerId] = {
+          playerId,
+          nickname,
+          isOnline: true,
+          joinedAt: Date.now(),
+        };
+        const client = this.clients.get(playerId);
+        if (client) {
+          client.roomCode = code;
+          client.isSpectator = true;
+        }
+        this.sendToPlayer(playerId, {
+          type: 'room:joined_as_spectator',
+          payload: { message: '对战已在进行中，已自动为您开启实时观战席位' },
+        });
+        console.log(`[PVP] Player ${nickname} (${playerId}) auto-joined room ${code} as spectator (match active).`);
+        this.broadcastRoomState(code);
+        return;
+      }
+      return this.sendError(playerId, '对战已开始或已结束，无法加入', 'MATCH_ALREADY_STARTED');
+    }
+
+    // Room is WAITING or READY: check player capacity
+    const currentPlayerCount = Object.keys(room.players).length;
+    if (currentPlayerCount >= room.maxPlayers) {
+      if (room.allowSpectators !== false) {
+        const nickname = (payload.nickname || `观众${Object.keys(room.spectators).length + 1}`).trim().slice(0, 16);
+        room.spectators[playerId] = {
+          playerId,
+          nickname,
+          isOnline: true,
+          joinedAt: Date.now(),
+        };
+        const client = this.clients.get(playerId);
+        if (client) {
+          client.roomCode = code;
+          client.isSpectator = true;
+        }
+        this.sendToPlayer(playerId, {
+          type: 'room:joined_as_spectator',
+          payload: { message: `选手席位已满（上限 ${room.maxPlayers} 人），已自动为您转入观战席位` },
+        });
+        console.log(`[PVP] Player ${nickname} (${playerId}) auto-joined room ${code} as spectator (player capacity reached).`);
+        this.broadcastRoomState(code);
+        return;
+      }
+      return this.sendError(playerId, `房间已满（上限 ${room.maxPlayers} 人对战）`, 'ROOM_FULL');
+    }
+
+    // New challenger player slot
+    const playerNumber = currentPlayerCount + 1;
+    const nickname = (payload.nickname || `玩家${playerNumber}`).trim().slice(0, 16);
+    room.players[playerId] = {
+      playerId,
+      nickname,
+      isHost: false,
+      isReady: false,
+      isOnline: true,
+      lastActiveAt: Date.now(),
+      currentSegmentIndex: 0,
+      submissions: {},
+      totalScore: 0,
+      isFinished: false,
+    };
+
+    const client = this.clients.get(playerId);
+    if (client) {
+      client.roomCode = code;
+      client.isSpectator = false;
+    }
+
+    console.log(
+      `[PVP] Player ${nickname} (${playerId}) joined room ${code}. Total players: ${Object.keys(room.players).length}/${room.maxPlayers}`
+    );
+    this.broadcastRoomState(code);
+  }
+
+  private switchRole(playerId: string, payload: { targetRole: 'player' | 'spectator' }) {
+    const client = this.clients.get(playerId);
+    if (!client?.roomCode) return;
+    const room = this.rooms.get(client.roomCode);
+    if (!room) return;
+
+    if (room.status !== 'WAITING' && room.status !== 'READY') {
+      return this.sendError(playerId, '比赛进行中无法切换身份');
+    }
+
+    const { targetRole } = payload;
+    if (targetRole === 'player') {
+      // Spectator switching to player
+      if (!room.spectators[playerId]) return;
+      if (Object.keys(room.players).length >= room.maxPlayers) {
+        return this.sendError(playerId, `选手席位已满（上限 ${room.maxPlayers} 人）`);
+      }
+      const spec = room.spectators[playerId];
+      delete room.spectators[playerId];
       room.players[playerId] = {
         playerId,
-        nickname: (payload.nickname || '玩家2').trim().slice(0, 16),
+        nickname: spec.nickname,
         isHost: false,
         isReady: false,
         isOnline: true,
@@ -226,22 +406,71 @@ class PvpManager {
         totalScore: 0,
         isFinished: false,
       };
+      client.isSpectator = false;
+      room.status = 'WAITING';
+      this.broadcastRoomState(room.roomCode);
+    } else if (targetRole === 'spectator') {
+      // Player switching to spectator
+      if (!room.players[playerId]) return;
+      if (room.allowSpectators === false) {
+        return this.sendError(playerId, '该房间未开启观战席');
+      }
+      const player = room.players[playerId];
+      const otherPlayers = Object.values(room.players).filter((p) => p.playerId !== playerId);
+      if (player.isHost) {
+        if (otherPlayers.length > 0) {
+          otherPlayers[0].isHost = true;
+        } else {
+          return this.sendError(playerId, '房间内只有房主一人，无法转为观战');
+        }
+      }
+      delete room.players[playerId];
+      room.spectators[playerId] = {
+        playerId,
+        nickname: player.nickname,
+        isOnline: true,
+        joinedAt: Date.now(),
+      };
+      client.isSpectator = true;
+      room.status = 'WAITING';
+      this.broadcastRoomState(room.roomCode);
+    }
+  }
+
+  private startEarly(playerId: string) {
+    const client = this.clients.get(playerId);
+    if (!client?.roomCode) return;
+    const room = this.rooms.get(client.roomCode);
+    if (!room || (room.status !== 'WAITING' && room.status !== 'READY')) return;
+
+    const player = room.players[playerId];
+    if (!player || !player.isHost) {
+      return this.sendError(playerId, '只有房主可以提前开赛');
     }
 
-    const client = this.clients.get(playerId);
-    if (client) client.roomCode = code;
+    const players = Object.values(room.players);
+    if (players.length < 2) {
+      return this.sendError(playerId, '至少需要 2 位选手才能开启比赛');
+    }
 
-    const joined = room.players[playerId];
+    if (!players.every((p) => p.isReady)) {
+      return this.sendError(playerId, '所有在场选手均需“准备就绪”才能开赛');
+    }
+
     console.log(
-      `[PVP] Player ${joined.nickname} (${playerId}) ${existingPlayer ? 're-' : ''}joined room ${code}. ` +
-        `Total players: ${Object.keys(room.players).length}, status=${room.status}, segment=${joined.currentSegmentIndex + 1}`
+      `[PVP] Host ${player.nickname} started match early in room ${room.roomCode} with ${players.length} players`
     );
-    this.broadcastRoomState(code);
+    this.startCountdown(room);
   }
 
   private updateRoomSettings(
     playerId: string,
-    payload: { year?: number; durationMinutes?: number }
+    payload: {
+      year?: number;
+      durationMinutes?: number;
+      maxPlayers?: number;
+      allowSpectators?: boolean;
+    }
   ) {
     const client = this.clients.get(playerId);
     if (!client?.roomCode) return;
@@ -265,6 +494,21 @@ class PvpManager {
       room.durationMinutes = payload.durationMinutes;
     }
 
+    if (payload.maxPlayers && [2, 3, 4].includes(payload.maxPlayers)) {
+      if (payload.maxPlayers >= Object.keys(room.players).length) {
+        room.maxPlayers = payload.maxPlayers;
+      } else {
+        return this.sendError(
+          playerId,
+          `当前已有 ${Object.keys(room.players).length} 名选手在场，无法将人数设为 ${payload.maxPlayers}`
+        );
+      }
+    }
+
+    if (typeof payload.allowSpectators === 'boolean') {
+      room.allowSpectators = payload.allowSpectators;
+    }
+
     this.broadcastRoomState(client.roomCode);
   }
 
@@ -283,10 +527,10 @@ class PvpManager {
     player.lastActiveAt = Date.now();
 
     const players = Object.values(room.players);
-    if (players.length === 2 && players.every((p) => p.isReady)) {
+    if (players.length >= 2 && players.length === room.maxPlayers && players.every((p) => p.isReady)) {
       this.startCountdown(room);
     } else {
-      room.status = players.length === 2 ? 'READY' : 'WAITING';
+      room.status = players.length >= 2 && players.every((p) => p.isReady) ? 'READY' : 'WAITING';
       this.broadcastRoomState(room.roomCode);
     }
   }
@@ -326,7 +570,9 @@ class PvpManager {
       p.isFinished = false;
     }
 
-    console.log(`[PVP] Match started in room ${room.roomCode}, duration: ${room.durationMinutes}m`);
+    console.log(
+      `[PVP] Match started in room ${room.roomCode}, players: ${Object.keys(room.players).length}, duration: ${room.durationMinutes}m`
+    );
     this.broadcastRoomState(room.roomCode);
 
     // Schedule match timeout
@@ -358,7 +604,7 @@ class PvpManager {
       }
     }
 
-    if (playerList.length >= 2) {
+    if (playerList.length === 2) {
       const p1 = playerList[0];
       const p2 = playerList[1];
 
@@ -368,38 +614,8 @@ class PvpManager {
 
         // Case A: Neither player answered this segment
         if (!sub1 && !sub2) {
-          p1.submissions[idx] = {
-            segmentIndex: idx,
-            originalText: room.exam.translationSegments[idx] || '',
-            studentAnswer: '（超时未作答）',
-            gradingStatus: 'graded',
-            submittedAt: Date.now(),
-            gradingResult: {
-              score: 0,
-              points_breakdown: [],
-              distortion_deduction: 0,
-              fluency_deduction: 0,
-              critique: '该题超时未作答，得 0 分。',
-              reference_translation: '',
-              gradedAt: Date.now(),
-            },
-          };
-          p2.submissions[idx] = {
-            segmentIndex: idx,
-            originalText: room.exam.translationSegments[idx] || '',
-            studentAnswer: '（超时未作答）',
-            gradingStatus: 'graded',
-            submittedAt: Date.now(),
-            gradingResult: {
-              score: 0,
-              points_breakdown: [],
-              distortion_deduction: 0,
-              fluency_deduction: 0,
-              critique: '该题超时未作答，得 0 分。',
-              reference_translation: '',
-              gradedAt: Date.now(),
-            },
-          };
+          p1.submissions[idx] = this.createTimeoutSubmission(room, idx);
+          p2.submissions[idx] = this.createTimeoutSubmission(room, idx);
           continue;
         }
 
@@ -440,21 +656,51 @@ class PvpManager {
           }
         }
       }
+    } else {
+      // 3 or 4 players timeout handling
+      for (const p of playerList) {
+        for (let idx = 0; idx < 5; idx++) {
+          const sub = p.submissions[idx];
+          if (!sub) {
+            p.submissions[idx] = this.createTimeoutSubmission(room, idx);
+          } else if (sub.gradingStatus === 'waiting_pair') {
+            this.triggerIndividualGrading(room, idx, p);
+          }
+        }
+      }
     }
 
     // Broadcast updated room state (so players know all inputs are locked)
     this.broadcastRoomState(room.roomCode);
 
-    // Set a 120-second guardrail timer to prevent rooms getting permanently stuck
-    // in case DeepSeek API hangs or encounters network failure
+    // 120-second guardrail timer to prevent rooms getting permanently stuck
     const guardrail = setTimeout(() => {
       console.warn(`[PVP] Guardrail timeout reached (120s) for room ${roomCode}. Force-finishing match.`);
       this.forceFinishHangingRoom(roomCode);
     }, 120000);
     this.guardrailTimers.set(roomCode, guardrail);
 
-    // Check if all grading is already complete (e.g. neither answered remaining questions)
+    // Check if all grading is already complete
     this.checkAllFinished(room);
+  }
+
+  private createTimeoutSubmission(room: PvpRoomState, idx: number): SegmentSubmission {
+    return {
+      segmentIndex: idx,
+      originalText: room.exam.translationSegments[idx] || '',
+      studentAnswer: '（超时未作答）',
+      gradingStatus: 'graded',
+      submittedAt: Date.now(),
+      gradingResult: {
+        score: 0,
+        points_breakdown: [],
+        distortion_deduction: 0,
+        fluency_deduction: 0,
+        critique: '该题超时未作答，得 0 分。',
+        reference_translation: '',
+        gradedAt: Date.now(),
+      },
+    };
   }
 
   private forceFinishHangingRoom(roomCode: string) {
@@ -506,8 +752,7 @@ class PvpManager {
       return this.sendError(playerId, '译文不能为空', 'EMPTY_ANSWER');
     }
 
-    // Idempotency: never overwrite an already accepted answer, and never trigger
-    // paired grading twice for the same segment (e.g. duplicate/retried sends).
+    // Idempotency: never overwrite an already accepted answer
     const existingSubmission = player.submissions[segmentIdx];
     if (existingSubmission && existingSubmission.gradingStatus !== 'error') {
       console.log(
@@ -528,8 +773,7 @@ class PvpManager {
       submittedAt: Date.now(),
     };
 
-    // Advance player to next segment immediately so no blocking.
-    // Math.max guarantees the client can never be sent backwards to an earlier question.
+    // Advance player to next segment immediately so no blocking
     player.currentSegmentIndex = Math.max(player.currentSegmentIndex, Math.min(segmentIdx + 1, 4));
     if (segmentIdx === 4) {
       player.isFinished = true;
@@ -540,20 +784,81 @@ class PvpManager {
       `[PVP] Segment ${segmentIdx + 1} submitted by ${player.nickname} (${playerId}) in room ${room.roomCode} (len=${answer.length})`
     );
 
-    // Check if opponent has already submitted this segment
     const players = Object.values(room.players);
-    const opponent = players.find((p) => p.playerId !== playerId);
-
-    if (opponent && opponent.submissions[segmentIdx]) {
-      // Both players have submitted segmentIdx! Trigger paired grading!
-      this.triggerPairedGrading(room, segmentIdx, player, opponent);
+    if (players.length === 2) {
+      // 2 players: paired grading
+      const opponent = players.find((p) => p.playerId !== playerId);
+      if (opponent && opponent.submissions[segmentIdx]) {
+        this.triggerPairedGrading(room, segmentIdx, player, opponent);
+      } else {
+        this.broadcastRoomState(room.roomCode);
+      }
     } else {
-      // Opponent hasn't submitted yet, broadcast state
-      this.broadcastRoomState(room.roomCode);
+      // 3 or 4 players: trigger individual grading immediately so no player is blocked
+      this.triggerIndividualGrading(room, segmentIdx, player);
     }
 
     // Safety net: if this submission completed the match, settle it.
     this.checkAllFinished(room);
+  }
+
+  private triggerIndividualGrading(
+    room: PvpRoomState,
+    segmentIdx: number,
+    player: PlayerState
+  ) {
+    const sub = player.submissions[segmentIdx];
+    if (!sub) return;
+    if (sub.gradingStatus === 'grading' || sub.gradingStatus === 'graded') return;
+
+    sub.gradingStatus = 'grading';
+    this.broadcastRoomState(room.roomCode);
+
+    const targetSentence = room.exam.translationSegments[segmentIdx];
+    console.log(
+      `[PVP Individual] Grading Segment ${segmentIdx + 1} for ${player.nickname} (${player.playerId}) in Room ${room.roomCode}`
+    );
+
+    gradeTranslation({
+      fullArticle: room.exam.contentMarkdown,
+      targetSentence,
+      studentAnswer: sub.studentAnswer,
+    })
+      .then((result) => {
+        sub.gradingStatus = 'graded';
+        sub.gradingResult = result;
+
+        player.totalScore = Object.values(player.submissions).reduce(
+          (sum, s) => sum + (s.gradingResult?.score || 0),
+          0
+        );
+
+        console.log(
+          `[PVP Individual] Scored Segment ${segmentIdx + 1} for ${player.nickname}: ${result.score}p (Total: ${player.totalScore.toFixed(1)})`
+        );
+
+        this.broadcast(room.roomCode, {
+          type: 'segment:graded',
+          payload: {
+            segmentIndex: segmentIdx,
+            playerId: player.playerId,
+            score: result.score,
+            gradingResult: result,
+            totalScore: player.totalScore,
+          },
+        });
+
+        this.broadcastRoomState(room.roomCode);
+        this.checkAllFinished(room);
+      })
+      .catch((err) => {
+        console.error(`[PVP Individual] Grading failed for ${player.nickname}:`, err);
+        sub.gradingStatus = 'error';
+        sub.error = err.message || '评分服务出现暂时错误';
+
+        this.broadcastRoomState(room.roomCode);
+        this.checkAllFinished(room);
+      });
   }
 
   private triggerPairedGrading(
@@ -566,7 +871,6 @@ class PvpManager {
     const subB = playerB.submissions[segmentIdx];
     if (!subA || !subB) return;
 
-    // Prevent a duplicate trigger if either side is already grading or already graded
     const isSettled = (s: typeof subA) => s.gradingStatus === 'grading' || s.gradingStatus === 'graded';
     if (isSettled(subA) || isSettled(subB)) return;
 
@@ -594,7 +898,6 @@ class PvpManager {
         subB.gradingResult = pairResult.studentB;
         subB.comparativeAnalysis = pairResult.comparativeAnalysis;
 
-        // Recalculate total scores for both players
         playerA.totalScore = Object.values(playerA.submissions).reduce(
           (sum, s) => sum + (s.gradingResult?.score || 0),
           0
@@ -604,7 +907,9 @@ class PvpManager {
           0
         );
 
-        console.log(`[PVP Pair] Scored Segment ${segmentIdx + 1} for ${playerA.nickname} (${pairResult.studentA.score}p) & ${playerB.nickname} (${pairResult.studentB.score}p)`);
+        console.log(
+          `[PVP Pair] Scored Segment ${segmentIdx + 1} for ${playerA.nickname} (${pairResult.studentA.score}p) & ${playerB.nickname} (${pairResult.studentB.score}p)`
+        );
 
         this.broadcast(room.roomCode, {
           type: 'segment:paired_graded',
@@ -654,7 +959,7 @@ class PvpManager {
     );
 
     if (!anyPending) {
-      const reason = (room.matchEndTime && Date.now() >= room.matchEndTime) ? 'timeout' : 'completed';
+      const reason = room.matchEndTime && Date.now() >= room.matchEndTime ? 'timeout' : 'completed';
       this.finishMatch(room.roomCode, reason);
     }
   }
@@ -677,26 +982,11 @@ class PvpManager {
 
     const playerList = Object.values(room.players);
 
-    // Ensure all 5 segments exist for both players and total scores are accurately summed
+    // Ensure all 5 segments exist for all players and total scores are accurately summed
     for (const player of playerList) {
       for (let idx = 0; idx < 5; idx++) {
         if (!player.submissions[idx]) {
-          player.submissions[idx] = {
-            segmentIndex: idx,
-            originalText: room.exam.translationSegments[idx] || '',
-            studentAnswer: '（超时未作答）',
-            gradingStatus: 'graded',
-            submittedAt: Date.now(),
-            gradingResult: {
-              score: 0,
-              points_breakdown: [],
-              distortion_deduction: 0,
-              fluency_deduction: 0,
-              critique: '未作答，得0分。',
-              reference_translation: '',
-              gradedAt: Date.now(),
-            },
-          };
+          player.submissions[idx] = this.createTimeoutSubmission(room, idx);
         }
       }
 
@@ -708,51 +998,54 @@ class PvpManager {
 
     room.status = 'FINISHED';
 
-    if (playerList.length >= 2) {
-      const p1 = playerList[0];
-      const p2 = playerList[1];
-      if (p1.totalScore > p2.totalScore) {
-        room.winnerId = p1.playerId;
-      } else if (p2.totalScore > p1.totalScore) {
-        room.winnerId = p2.playerId;
-      } else {
+    // Calculate Leaderboard Rankings
+    const sorted = playerList.slice().sort((a, b) => b.totalScore - a.totalScore);
+    let currentRank = 1;
+    const rankings: PlayerRanking[] = sorted.map((p, idx, arr) => {
+      if (idx > 0 && p.totalScore < arr[idx - 1].totalScore) {
+        currentRank = idx + 1;
+      }
+      return {
+        playerId: p.playerId,
+        nickname: p.nickname,
+        totalScore: p.totalScore,
+        rank: currentRank,
+        isFinished: p.isFinished,
+        finishedAt: p.finishedAt,
+      };
+    });
+    room.rankings = rankings;
+
+    if (sorted.length > 0) {
+      if (sorted.length > 1 && sorted[0].totalScore === sorted[1].totalScore) {
         room.winnerId = 'draw';
+      } else {
+        room.winnerId = sorted[0].playerId;
       }
     }
 
     console.log(
       `[PVP] Match ended in room ${roomCode}, winner: ${room.winnerId}, reason: ${reason}, scores: ${playerList
         .map((p) => `${p.nickname}: ${p.totalScore.toFixed(1)}`)
-        .join(' vs ')}`
+        .join(' | ')}`
     );
 
     // Authoritative Server-side persistence to SQLite
     for (const player of playerList) {
-      const opp = playerList.find((p) => p.playerId !== player.playerId);
-      const isWinner = room.winnerId === player.playerId;
-      const isDraw = room.winnerId === 'draw';
+      const myRankObj = rankings.find((r) => r.playerId === player.playerId);
+      const myRank = myRankObj ? myRankObj.rank : 1;
+      const isWinner = myRank === 1 && room.winnerId === player.playerId;
+      const isDraw = room.winnerId === 'draw' && myRank === 1;
       const outcome: 'win' | 'draw' | 'loss' = isWinner ? 'win' : isDraw ? 'draw' : 'loss';
+
+      const otherPlayers = playerList.filter((p) => p.playerId !== player.playerId);
+      const primaryOpponent = otherPlayers[0];
 
       const deterministicId = `pvp-${room.roomCode}-${room.startedAt || room.createdAt || Date.now()}-${player.playerId}`;
 
       const submissionsList: SegmentSubmission[] = [0, 1, 2, 3, 4].map((idx) => {
         return (
-          player.submissions[idx] || {
-            segmentIndex: idx,
-            originalText: room.exam.translationSegments[idx] || '',
-            studentAnswer: '（超时未作答）',
-            gradingStatus: 'graded',
-            submittedAt: Date.now(),
-            gradingResult: {
-              score: 0,
-              points_breakdown: [],
-              distortion_deduction: 0,
-              fluency_deduction: 0,
-              critique: '未作答，得0分。',
-              reference_translation: '',
-              gradedAt: Date.now(),
-            },
-          }
+          player.submissions[idx] || this.createTimeoutSubmission(room, idx)
         );
       });
 
@@ -766,18 +1059,27 @@ class PvpManager {
           ? Math.floor((Date.now() - room.startedAt) / 1000)
           : room.durationMinutes * 60,
         submissions: submissionsList,
-        pvpDetails: opp
+        pvpDetails: primaryOpponent
           ? {
-              opponentNickname: opp.nickname,
-              opponentScore: opp.totalScore,
+              opponentNickname: primaryOpponent.nickname,
+              opponentScore: primaryOpponent.totalScore,
               outcome,
+              rank: myRank,
+              playerCount: playerList.length,
+              leaderboard: rankings.map((r) => ({
+                nickname: r.nickname,
+                score: r.totalScore,
+                rank: r.rank,
+              })),
             }
           : undefined,
       };
 
       try {
         db.saveHistoryRecord(player.playerId, record);
-        console.log(`[PVP] Authoritatively saved history record ${record.id} for player ${player.nickname} (${player.playerId})`);
+        console.log(
+          `[PVP] Authoritatively saved history record ${record.id} for player ${player.nickname} (${player.playerId})`
+        );
       } catch (err) {
         console.error(`[PVP] Failed to save history record for ${player.playerId}:`, err);
       }
@@ -787,6 +1089,7 @@ class PvpManager {
       type: 'match:ended',
       payload: {
         winnerId: room.winnerId,
+        rankings: room.rankings,
         reason,
         roomState: room,
       },
@@ -804,32 +1107,46 @@ class PvpManager {
       room = this.findRoomByPlayerId(playerId);
     }
 
-    if (room && room.players[playerId]) {
-      const player = room.players[playerId];
-      const client = this.clients.get(playerId);
-      if (client) client.roomCode = room.roomCode;
-      player.isOnline = true;
-      player.lastActiveAt = Date.now();
+    if (room) {
+      const isPlayer = !!room.players[playerId];
+      const isSpectator = !!room.spectators[playerId];
 
-      console.log(
-        `[PVP] Manual reconnect successful for player ${playerId} into room ${room.roomCode} ` +
-          `(status=${room.status}, segment=${player.currentSegmentIndex + 1})`
-      );
-      this.sendToPlayer(playerId, {
-        type: 'room:state',
-        payload: room,
-      });
-      this.broadcastRoomState(room.roomCode);
-    } else {
-      console.warn(`[PVP] Reconnect failed for player ${playerId}, room not found`);
-      // Explicit, terminal signal so the client stops retrying and tells the user.
-      this.sendError(playerId, '对战已结束或房间已失效', 'ROOM_NOT_FOUND');
+      if (isPlayer || isSpectator) {
+        const client = this.clients.get(playerId);
+        if (client) {
+          client.roomCode = room.roomCode;
+          client.isSpectator = isSpectator;
+        }
+
+        if (isPlayer) {
+          const player = room.players[playerId];
+          player.isOnline = true;
+          player.lastActiveAt = Date.now();
+          console.log(
+            `[PVP] Manual reconnect successful for player ${playerId} into room ${room.roomCode} ` +
+              `(status=${room.status}, segment=${player.currentSegmentIndex + 1})`
+          );
+        } else {
+          const spec = room.spectators[playerId];
+          spec.isOnline = true;
+          console.log(
+            `[PVP] Manual reconnect successful for spectator ${playerId} into room ${room.roomCode}`
+          );
+        }
+
+        this.sendToPlayer(playerId, {
+          type: 'room:state',
+          payload: room,
+        });
+        this.broadcastRoomState(room.roomCode);
+        return;
+      }
     }
+
+    console.warn(`[PVP] Reconnect failed for user ${playerId}, room not found`);
+    this.sendError(playerId, '对战已结束或房间已失效', 'ROOM_NOT_FOUND');
   }
 
-  /**
-   * Explicit leave initiated by the user (clicking "退出房间")
-   */
   private leaveRoom(playerId: string) {
     const client = this.clients.get(playerId);
     const roomCode = client?.roomCode;
@@ -837,31 +1154,25 @@ class PvpManager {
     const room = this.rooms.get(roomCode);
     if (!room) return;
 
-    console.log(`[PVP] Player ${playerId} explicitly left room ${roomCode}`);
-    delete room.players[playerId];
-    client.roomCode = undefined;
+    if (room.spectators[playerId]) {
+      console.log(`[PVP] Spectator ${playerId} explicitly left room ${roomCode}`);
+      delete room.spectators[playerId];
+      client.roomCode = undefined;
+      client.isSpectator = false;
+      this.broadcastRoomState(room.roomCode);
+      return;
+    }
 
-    const remainingPlayers = Object.values(room.players);
-    if (remainingPlayers.length === 0) {
-      // Clean up empty room
-      console.log(`[PVP] Room ${roomCode} has 0 players left, deleting.`);
-      this.rooms.delete(room.roomCode);
-      const timer = this.matchTimers.get(room.roomCode);
-      if (timer) {
-        clearTimeout(timer);
-        this.matchTimers.delete(room.roomCode);
-      }
-      const guardrail = this.guardrailTimers.get(room.roomCode);
-      if (guardrail) {
-        clearTimeout(guardrail);
-        this.guardrailTimers.delete(room.roomCode);
-      }
-    } else {
-      // Re-assign host if host left
-      if (!remainingPlayers.some((p) => p.isHost)) {
-        remainingPlayers[0].isHost = true;
-      }
-      if (room.status === 'IN_PROGRESS') {
+    if (room.players[playerId]) {
+      console.log(`[PVP] Player ${playerId} explicitly left room ${roomCode}`);
+      delete room.players[playerId];
+      client.roomCode = undefined;
+      client.isSpectator = false;
+
+      const remainingPlayers = Object.values(room.players);
+      if (remainingPlayers.length === 0) {
+        console.log(`[PVP] Room ${roomCode} has 0 players left, deleting.`);
+        this.rooms.delete(room.roomCode);
         const timer = this.matchTimers.get(room.roomCode);
         if (timer) {
           clearTimeout(timer);
@@ -872,23 +1183,18 @@ class PvpManager {
           clearTimeout(guardrail);
           this.guardrailTimers.delete(room.roomCode);
         }
-        room.status = 'FINISHED';
-        room.winnerId = remainingPlayers[0].playerId;
+      } else {
+        if (!remainingPlayers.some((p) => p.isHost)) {
+          remainingPlayers[0].isHost = true;
+        }
+        if (room.status === 'IN_PROGRESS') {
+          this.checkAllFinished(room);
+        }
+        this.broadcastRoomState(room.roomCode);
       }
-      this.broadcastRoomState(room.roomCode);
     }
   }
 
-  /**
-   * Socket disconnects unexpectedly (e.g. mobile switch to WeChat, lock screen, network glitch)
-   * We PRESERVE the room and do NOT delete it!
-   *
-   * `ws` is the socket that actually closed. If it has already been replaced by a
-   * newer connection (auto-reconnect), we must ignore the stale close event:
-   * otherwise we would delete the LIVE socket from playerSockets, and every future
-   * broadcast to that player would be silently dropped — freezing their client on
-   * whatever question it last rendered.
-   */
   private handleDisconnect(playerId: string, ws?: WebSocket) {
     const currentSocket = this.playerSockets.get(playerId);
     if (ws && currentSocket && currentSocket !== ws) {
@@ -897,10 +1203,19 @@ class PvpManager {
     }
 
     const room = this.findRoomByPlayerId(playerId);
-    if (room && room.players[playerId]) {
-      room.players[playerId].isOnline = false;
-      room.players[playerId].lastActiveAt = Date.now();
-      console.log(`[PVP] Socket disconnected for player ${room.players[playerId].nickname} (${playerId}) in room ${room.roomCode}. Room preserved.`);
+    if (room) {
+      if (room.players[playerId]) {
+        room.players[playerId].isOnline = false;
+        room.players[playerId].lastActiveAt = Date.now();
+        console.log(
+          `[PVP] Socket disconnected for player ${room.players[playerId].nickname} (${playerId}) in room ${room.roomCode}. Room preserved.`
+        );
+      } else if (room.spectators[playerId]) {
+        room.spectators[playerId].isOnline = false;
+        console.log(
+          `[PVP] Socket disconnected for spectator ${room.spectators[playerId].nickname} (${playerId}) in room ${room.roomCode}.`
+        );
+      }
       this.broadcastRoomState(room.roomCode);
     }
 
@@ -912,7 +1227,12 @@ class PvpManager {
     if (!room) return;
 
     const data = JSON.stringify(message);
-    for (const pid of Object.keys(room.players)) {
+    const recipients = new Set([
+      ...Object.keys(room.players),
+      ...Object.keys(room.spectators),
+    ]);
+
+    for (const pid of recipients) {
       const ws = this.playerSockets.get(pid);
       if (ws && ws.readyState === 1 /* OPEN */) {
         ws.send(data);
@@ -963,10 +1283,11 @@ class PvpManager {
         continue;
       }
 
-      // 2. Waiting rooms with NO online players for over 30 minutes
+      // 2. Waiting rooms with NO online participants for over 30 minutes
       const hasOnlinePlayers = Object.values(room.players).some((p) => p.isOnline);
+      const hasOnlineSpectators = Object.values(room.spectators).some((s) => s.isOnline);
       const isOldWaitingRoom = room.createdAt && now - room.createdAt > 30 * 60 * 1000;
-      if (room.status === 'WAITING' && !hasOnlinePlayers && isOldWaitingRoom) {
+      if (room.status === 'WAITING' && !hasOnlinePlayers && !hasOnlineSpectators && isOldWaitingRoom) {
         console.log(`[PVP] Cleaning up abandoned waiting room ${code} (inactive > 30m)`);
         const timer = this.matchTimers.get(code);
         if (timer) {
