@@ -325,6 +325,14 @@ async function main() {
       return;
     }
 
+    // The claimed playerId must belong to the authenticated user. Without this binding any
+    // logged-in user could open a second socket under a forged id, re-enter a live room as a
+    // "spectator" and read every player's answers.
+    if (verified.userId !== playerId) {
+      socket.close(4001, 'playerId does not match the authenticated user');
+      return;
+    }
+
     pvpManager.registerClient(playerId, socket as any);
   });
 

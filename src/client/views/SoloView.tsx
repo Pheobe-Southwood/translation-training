@@ -7,7 +7,6 @@ import {
   ChevronRight,
   Trophy,
   RotateCcw,
-  Sparkles,
   BookOpen,
   ChevronDown,
   ChevronUp,

@@ -1,4 +1,4 @@
-import type { PvpRoomState } from '../../shared/types.js';
+import type { PvpRoomSummary, RoundDetail } from '../../shared/types.js';
 import { getAuthToken } from './storage.js';
 
 /**
@@ -50,7 +50,8 @@ export class PvpSocket {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private manuallyClosed = false;
   private reactivateBound = false;
-  private lastRoomState: PvpRoomState | null = null;
+  private lastSummary: PvpRoomSummary | null = null;
+  private readonly roundDetails = new Map<number, RoundDetail>();
   private pendingSends: string[] = [];
 
   private readonly messageHandlers = new Set<MessageHandler>();
@@ -63,14 +64,18 @@ export class PvpSocket {
   // --- Subscriptions -------------------------------------------------------
 
   /**
-   * Register a message handler. The latest `room:state` is replayed immediately so
-   * the lobby -> match view hand-off never misses an authoritative frame.
+   * Register a message handler. The latest `room:summary` (and every cached
+   * `round:detail`) is replayed immediately so the lobby -> match view hand-off never
+   * misses an authoritative frame.
    */
   public subscribe(handler: MessageHandler): () => void {
     this.messageHandlers.add(handler);
-    if (this.lastRoomState) {
+    if (this.lastSummary) {
       try {
-        handler({ type: 'room:state', payload: this.lastRoomState });
+        handler({ type: 'room:summary', payload: this.lastSummary });
+        for (const detail of this.roundDetails.values()) {
+          handler({ type: 'round:detail', payload: detail });
+        }
       } catch (err) {
         console.error('[PVP] Replay handler failed', err);
       }
@@ -106,8 +111,17 @@ export class PvpSocket {
     return this.roomCode;
   }
 
-  public getLastRoomState(): PvpRoomState | null {
-    return this.lastRoomState;
+  public getLastSummary(): PvpRoomSummary | null {
+    return this.lastSummary;
+  }
+
+  public getRoundDetail(roundIndex: number): RoundDetail | undefined {
+    return this.roundDetails.get(roundIndex);
+  }
+
+  /** Asks the server for a round's detail and marks it as the round we are watching. */
+  public requestRound(roundIndex: number): void {
+    this.send({ type: 'round:request', payload: { roundIndex } });
   }
 
   public getReconnectAttempt(): number {
@@ -234,8 +248,12 @@ export class PvpSocket {
         return;
       }
 
-      if (msg?.type === 'room:state' && msg.payload) {
-        this.lastRoomState = msg.payload as PvpRoomState;
+      if (msg?.type === 'room:summary' && msg.payload) {
+        this.lastSummary = msg.payload as PvpRoomSummary;
+      }
+      if (msg?.type === 'round:detail' && msg.payload) {
+        const detail = msg.payload as RoundDetail;
+        this.roundDetails.set(detail.roundIndex, detail);
       }
 
       if (msg?.type === 'error' && msg.payload?.code === 'ROOM_NOT_FOUND') {
