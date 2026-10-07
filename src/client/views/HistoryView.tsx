@@ -160,14 +160,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onBack }) => {
 
                     <div>
                       <div className="font-black text-sm sm:text-base text-swiss-black dark:text-zinc-100">
-                        {rec.roundCount && rec.roundCount > 1
-                          ? `多轮系列赛 · ${rec.roundCount} 轮（${rec.year} 年起）`
-                          : `${rec.year} 年考研英语（一）翻译`}
-                        {rec.wentOvertime && (
-                          <span className="ml-2 font-mono text-[10px] bg-swiss-red text-white px-1.5 py-0.5 uppercase align-middle">
-                            经历加赛
-                          </span>
-                        )}
+                        {rec.year} 年考研英语（一）翻译
                       </div>
                       <div className="font-mono text-xs text-zinc-500 dark:text-zinc-400 flex items-center gap-3 mt-0.5">
                         <span>{dateStr}</span>
@@ -175,11 +168,6 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onBack }) => {
                           <Clock className="w-3 h-3" />
                           {formatDuration(rec.timeSpentSeconds)}
                         </span>
-                        {rec.rounds && rec.rounds.length > 0 && (
-                          <span className="flex items-center gap-1">
-                            大比分 {(rec.matchPoints ?? 0).toFixed(1)}
-                          </span>
-                        )}
                       </div>
                     </div>
                   </div>
@@ -216,18 +204,11 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onBack }) => {
                     )}
 
                     {/* Total Score */}
-                    <div className="flex flex-col items-end gap-0.5">
-                      <div className="flex items-baseline gap-1 bg-zinc-100 dark:bg-zinc-800 border border-swiss-black dark:border-zinc-700 px-3 py-0.5 sm:px-3.5 sm:py-1">
-                        <span className="font-mono text-lg sm:text-xl font-black text-swiss-red">
-                          {rec.totalScore.toFixed(1)}
-                        </span>
-                        <span className="font-mono text-xs text-zinc-500 dark:text-zinc-400">
-                          / {(10 * (rec.roundCount ?? 1)).toFixed(1)}
-                        </span>
-                      </div>
-                      <span className="font-mono text-[10px] text-zinc-500 dark:text-zinc-400">
-                        累计小分{rec.rounds && rec.rounds.length > 0 ? ` · 大比分 ${(rec.matchPoints ?? 0).toFixed(1)}` : ''}
+                    <div className="flex items-baseline gap-1 bg-zinc-100 dark:bg-zinc-800 border border-swiss-black dark:border-zinc-700 px-3 py-0.5 sm:px-3.5 sm:py-1">
+                      <span className="font-mono text-lg sm:text-xl font-black text-swiss-red">
+                        {rec.totalScore.toFixed(1)}
                       </span>
+                      <span className="font-mono text-xs text-zinc-500 dark:text-zinc-400">/ 10.0</span>
                     </div>
 
                     <div className="text-zinc-400">
@@ -239,68 +220,22 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onBack }) => {
                 {/* Expanded Details */}
                 {isExpanded && (
                   <div className="border-t-2 border-swiss-black dark:border-zinc-700 p-4 sm:p-6 bg-zinc-50 dark:bg-zinc-800/40 space-y-5">
-                    {/* Multi-round series: group everything by round */}
-                    {rec.rounds && rec.rounds.length > 0 && (
-                      <div className="space-y-3">
-                        <div className="font-mono text-xs font-bold text-zinc-700 dark:text-zinc-300 uppercase flex items-center gap-1.5">
-                          <Sparkles className="w-3.5 h-3.5 text-swiss-red" />
-                          逐轮战绩
-                        </div>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                          {rec.rounds.map((round) => (
-                            <div
-                              key={round.roundIndex}
-                              className="p-2.5 border-2 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono text-[11px] space-y-1"
-                            >
-                              <div className="flex items-center justify-between font-bold">
-                                <span>
-                                  {round.isOvertime ? '加赛局' : `第 ${round.roundIndex + 1} 轮`} · {round.year} 年
-                                </span>
-                                <span className="text-swiss-red">+{round.matchPointsDelta.toFixed(1)}</span>
-                              </div>
-                              <div className="text-zinc-500 dark:text-zinc-400">
-                                小分 {round.smallScore.toFixed(1)} / 10.0 · 用时 {formatDuration(round.elapsedSeconds)}
-                                {round.timedOut && ' · 超时'}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
                     <div className="font-mono text-xs font-bold text-zinc-700 dark:text-zinc-300 uppercase flex items-center gap-1.5">
                       <Sparkles className="w-3.5 h-3.5 text-swiss-red" />
-                      {rec.rounds && rec.rounds.length > 1
-                        ? `全套${rec.rounds.length}轮 · 逐题作答与 AI 阅卷评定细则`
-                        : '全套 5 题作答与 AI 阅卷评定细则'}
+                      全套 5 题作答与 AI 阅卷评定细则
                     </div>
 
                     <div className="space-y-4">
-                      {(rec.rounds && rec.rounds.length > 0
-                        ? rec.rounds.flatMap((round) =>
-                            round.submissions.map((sub, idx) => ({
-                              sub,
-                              idx,
-                              label: `${round.isOvertime ? '加赛' : `R${round.roundIndex + 1}`} · 第 ${idx + 1} 题`,
-                            }))
-                          )
-                        : rec.submissions.map((sub, idx) => ({ sub, idx, label: null }))
-                      ).map(({ sub, idx, label }, i) => {
+                      {rec.submissions.map((sub, idx) => {
                         if (!sub.gradingResult) return null;
                         return (
-                          <div key={i} className="space-y-1.5">
-                            {label && (
-                              <div className="font-mono text-[11px] font-bold text-zinc-500 dark:text-zinc-400">
-                                {label}
-                              </div>
-                            )}
-                            <GradingCard
-                              result={sub.gradingResult}
-                              studentAnswer={sub.studentAnswer}
-                              originalText={sub.originalText}
-                              segmentIndex={idx}
-                            />
-                          </div>
+                          <GradingCard
+                            key={idx}
+                            result={sub.gradingResult}
+                            studentAnswer={sub.studentAnswer}
+                            originalText={sub.originalText}
+                            segmentIndex={idx}
+                          />
                         );
                       })}
                     </div>

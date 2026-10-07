@@ -2,16 +2,6 @@ import { spawn, ChildProcess } from 'child_process';
 import { WebSocket } from 'ws';
 import dotenv from 'dotenv';
 
-// --- multi-round protocol helpers -------------------------------------------------
-const findPlayer = (payload: any, id: string) =>
-  (payload?.players || []).find((p: any) => p.playerId === id);
-const findSpectator = (payload: any, id: string) =>
-  (payload?.spectators || []).find((s: any) => s.playerId === id);
-const playerCount = (payload: any) => (payload?.players || []).length;
-const isSummary = (msg: any) => msg?.type === 'room:summary';
-// ---------------------------------------------------------------------------------
-
-
 dotenv.config();
 
 async function wait(ms: number) {
@@ -150,27 +140,13 @@ async function runTests() {
 
     // 8. PVP WebSocket Room Flow (Host & Guest)
     console.log('\n--- Test 8: PVP WebSocket Room & Match Flow ---');
-    // The /ws handshake binds the claimed playerId to the token's user, so the guest
-    // needs a real second account rather than a made-up id.
-    const guestUsername = `verify_guest_${Date.now().toString().slice(-4)}`;
-    const guestRegRes = await fetch(`${BASE_URL}/api/auth/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        username: guestUsername,
-        password: 'Password123!',
-        invitationCode: 'tt8888',
-        nickname: '验证对手',
-      }),
-    });
-    const guestRegData = await guestRegRes.json();
-    if (!guestRegData.token) throw new Error('Guest registration failed');
+    const hostPlayerId = 'p_host_123';
+    const guestPlayerId = 'p_guest_456';
 
-    const hostPlayerId = checkData.user.id;
-    const guestPlayerId = guestRegData.user.id;
+    const wsUrl = `ws://127.0.0.1:8889/ws?token=${token}`;
 
-    const hostWs = new WebSocket(`ws://127.0.0.1:8889/ws?token=${token}&playerId=${hostPlayerId}`);
-    const guestWs = new WebSocket(`ws://127.0.0.1:8889/ws?token=${guestRegData.token}&playerId=${guestPlayerId}`);
+    const hostWs = new WebSocket(`${wsUrl}&playerId=${hostPlayerId}`);
+    const guestWs = new WebSocket(`${wsUrl}&playerId=${guestPlayerId}`);
 
     let roomCode = '';
 
@@ -188,7 +164,7 @@ async function runTests() {
 
       hostWs.on('message', (raw) => {
         const msg = JSON.parse(raw.toString());
-        if (msg.type === 'room:summary') {
+        if (msg.type === 'room:state') {
           const room = msg.payload;
           if (!roomCode && room.roomCode) {
             roomCode = room.roomCode;
@@ -200,7 +176,7 @@ async function runTests() {
                 payload: { roomCode, nickname: '测试挑战者' },
               })
             );
-          } else if (playerCount(room) === 2 && !findPlayer(room, hostPlayerId)?.isReady) {
+          } else if (Object.keys(room.players).length === 2 && !room.players[hostPlayerId]?.isReady) {
             console.log('Both players in room, toggling ready!');
             hostWs.send(JSON.stringify({ type: 'room:toggle_ready' }));
             guestWs.send(JSON.stringify({ type: 'room:toggle_ready' }));
@@ -218,16 +194,6 @@ async function runTests() {
       });
 
       setTimeout(() => reject(new Error('PVP Flow timed out')), 15000);
-    });
-
-    // A zero-score tie would open the overtime vote; decline it so the smoke test ends.
-    hostWs.on('message', (raw) => {
-      try {
-        const msg = JSON.parse(raw.toString());
-        if (msg?.type === 'overtime:vote_started') {
-          hostWs.send(JSON.stringify({ type: 'overtime:vote', payload: { agree: false } }));
-        }
-      } catch {}
     });
 
     hostWs.close();

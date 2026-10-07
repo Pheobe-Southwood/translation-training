@@ -3,16 +3,6 @@ import { WebSocket } from 'ws';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'path';
 
-// --- multi-round protocol helpers -------------------------------------------------
-const findPlayer = (payload: any, id: string) =>
-  (payload?.players || []).find((p: any) => p.playerId === id);
-const findSpectator = (payload: any, id: string) =>
-  (payload?.spectators || []).find((s: any) => s.playerId === id);
-const playerCount = (payload: any) => (payload?.players || []).length;
-const isSummary = (msg: any) => msg?.type === 'room:summary';
-// ---------------------------------------------------------------------------------
-
-
 async function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -108,7 +98,7 @@ async function testPvpTimeout() {
 
       hostWs.on('message', (d) => {
         const msg = JSON.parse(d.toString());
-        if (msg.type === 'room:summary' && !roomCode) {
+        if (msg.type === 'room:state' && !roomCode) {
           roomCode = msg.payload.roomCode;
           console.log(`Room created: ${roomCode}`);
           guestWs.send(
@@ -118,13 +108,13 @@ async function testPvpTimeout() {
             })
           );
         } else if (
-          msg.type === 'room:summary' &&
-          playerCount(msg.payload) === 2 &&
-          !findPlayer(msg.payload, hostId)?.isReady
+          msg.type === 'room:state' &&
+          Object.keys(msg.payload.players).length === 2 &&
+          !msg.payload.players[hostId]?.isReady
         ) {
           hostWs.send(JSON.stringify({ type: 'room:toggle_ready' }));
           guestWs.send(JSON.stringify({ type: 'room:toggle_ready' }));
-        } else if (msg.type === 'room:summary' && msg.payload.status === 'IN_PROGRESS') {
+        } else if (msg.type === 'room:state' && msg.payload.status === 'IN_PROGRESS') {
           resolve();
         }
       });
@@ -169,33 +159,22 @@ async function testPvpTimeout() {
 
     let matchEndedPayload: any = null;
     let prematureMatchEnded = false;
-    let latestRoundDetail: any = null;
     let matchStartTime = Date.now();
 
     await new Promise<void>((resolve, reject) => {
       hostWs.on('message', (d) => {
         const msg = JSON.parse(d.toString());
-        if (msg.type === 'round:detail') {
-          latestRoundDetail = msg.payload;
-        }
-        if (msg.type === 'overtime:vote_started') {
-          // Both sides finished on zeros here, so the series ties and the vote opens.
-          // Decline immediately rather than waiting out the 30s deadline.
-          hostWs.send(JSON.stringify({ type: 'overtime:vote', payload: { agree: false } }));
-        }
         if (msg.type === 'match:ended') {
           console.log('\n[Received match:ended event]');
           console.log('Winner:', msg.payload.winnerId);
           console.log('Reason:', msg.payload.reason);
-          const summary = msg.payload.summary;
-          const p1 = summary.players.find((p: any) => p.playerId === hostId);
-          const p2 = summary.players.find((p: any) => p.playerId === guestId);
+          const p1 = msg.payload.roomState.players[hostId];
+          const p2 = msg.payload.roomState.players[guestId];
           console.log(`Scores -> Host: ${p1.totalScore}, Guest: ${p2.totalScore}`);
 
-          // Segment state now arrives through round:detail rather than the room snapshot.
-          const hostRound = latestRoundDetail?.players?.find((p: any) => p.playerId === hostId);
-          const seg0Graded = hostRound?.submissions?.[0]?.gradingStatus === 'graded';
-          const seg1Graded = hostRound?.submissions?.[1]?.gradingStatus === 'graded';
+          // Check if segments 0 and 1 are actually graded
+          const seg0Graded = p1.submissions[0]?.gradingStatus === 'graded';
+          const seg1Graded = p1.submissions[1]?.gradingStatus === 'graded';
 
           if (!seg0Graded || !seg1Graded) {
             console.error('ERROR: match:ended arrived BEFORE grading completed!');

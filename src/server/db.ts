@@ -23,16 +23,6 @@ export interface HistoryRow {
   time_spent_seconds: number;
   submissions_json: string;
   pvp_details_json: string | null;
-  round_count: number | null;
-  match_points: number | null;
-  went_overtime: number | null;
-  rounds_json: string | null;
-}
-
-export interface MatchSnapshotRow {
-  room_code: string;
-  payload_json: string;
-  updated_at: number;
 }
 
 class AppDatabase {
@@ -77,39 +67,7 @@ class AppDatabase {
       );
 
       CREATE INDEX IF NOT EXISTS idx_history_user_time ON history_records (user_id, timestamp DESC);
-
-      CREATE TABLE IF NOT EXISTS match_snapshots (
-        room_code TEXT PRIMARY KEY,
-        payload_json TEXT NOT NULL,
-        updated_at INTEGER NOT NULL
-      );
     `);
-
-    this.migrateSchema();
-  }
-
-  /**
-   * `CREATE TABLE IF NOT EXISTS` never adds columns to an existing database, so every
-   * schema addition has to be applied by hand. Each step is idempotent.
-   */
-  private migrateSchema() {
-    const columns = this.db.prepare(`PRAGMA table_info(history_records)`).all() as unknown as Array<{
-      name: string;
-    }>;
-    const existing = new Set(columns.map((c) => c.name));
-
-    const additions: Array<[string, string]> = [
-      ['round_count', 'INTEGER NOT NULL DEFAULT 1'],
-      ['match_points', 'REAL NOT NULL DEFAULT 0'],
-      ['went_overtime', 'INTEGER NOT NULL DEFAULT 0'],
-      ['rounds_json', 'TEXT'],
-    ];
-
-    for (const [name, ddl] of additions) {
-      if (existing.has(name)) continue;
-      this.db.exec(`ALTER TABLE history_records ADD COLUMN ${name} ${ddl}`);
-      console.log(`[DB] Migrated history_records: added column ${name}`);
-    }
   }
 
   // --- Users Operations ---
@@ -180,34 +138,27 @@ class AppDatabase {
   public saveHistoryRecord(userId: string, record: HistorySessionRecord): void {
     const submissionsJson = JSON.stringify(record.submissions || []);
     const pvpDetailsJson = record.pvpDetails ? JSON.stringify(record.pvpDetails) : null;
-    const roundsJson = record.rounds ? JSON.stringify(record.rounds) : null;
-    const roundCount = record.roundCount ?? 1;
-    const matchPoints = record.matchPoints ?? 0;
-    const wentOvertime = record.wentOvertime ? 1 : 0;
     const now = record.timestamp || Date.now();
 
-    // The record id is deterministic on BOTH sides (client and server derive the same
-    // `pvp-<room>-<startedAt>-<playerId>`), so a plain id lookup is the correct
-    // idempotency key. The old ±120s window merged genuinely distinct sessions.
+    // Defense-in-depth: Check for duplicate/prior submissions within a window (e.g. 120s)
+    // or by matching record id, to update in place and prevent duplicate inserts.
     const dupCheckStmt = this.db.prepare(`
-      SELECT id FROM history_records WHERE user_id = ? AND id = ? LIMIT 1
+      SELECT id FROM history_records
+      WHERE user_id = ? AND type = ? AND year = ? AND (id = ? OR abs(timestamp - ?) < 120000)
+      LIMIT 1
     `);
-    const existing = dupCheckStmt.get(userId, record.id) as { id: string } | undefined;
+    const existing = dupCheckStmt.get(userId, record.type, record.year, record.id, now) as { id: string } | undefined;
+
     const targetId = existing?.id || record.id;
 
     const stmt = this.db.prepare(`
       INSERT INTO history_records (
-        id, user_id, type, year, timestamp, total_score, time_spent_seconds,
-        submissions_json, pvp_details_json, round_count, match_points, went_overtime, rounds_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, user_id, type, year, timestamp, total_score, time_spent_seconds, submissions_json, pvp_details_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         total_score = excluded.total_score,
         submissions_json = excluded.submissions_json,
-        pvp_details_json = excluded.pvp_details_json,
-        round_count = excluded.round_count,
-        match_points = excluded.match_points,
-        went_overtime = excluded.went_overtime,
-        rounds_json = excluded.rounds_json
+        pvp_details_json = excluded.pvp_details_json
     `);
 
     stmt.run(
@@ -219,11 +170,7 @@ class AppDatabase {
       record.totalScore,
       record.timeSpentSeconds || 0,
       submissionsJson,
-      pvpDetailsJson,
-      roundCount,
-      matchPoints,
-      wentOvertime,
-      roundsJson
+      pvpDetailsJson
     );
   }
 
@@ -244,71 +191,7 @@ class AppDatabase {
       timeSpentSeconds: r.time_spent_seconds,
       submissions: JSON.parse(r.submissions_json || '[]'),
       pvpDetails: r.pvp_details_json ? JSON.parse(r.pvp_details_json) : undefined,
-      roundCount: r.round_count ?? 1,
-      matchPoints: r.match_points ?? 0,
-      wentOvertime: r.went_overtime === 1,
-      rounds: r.rounds_json ? JSON.parse(r.rounds_json) : undefined,
     }));
-  }
-
-  /**
-   * Every exam year each user has already played, unioned across solo, PVP and every
-   * round of a multi-round series. Used only for the overtime paper draw.
-   */
-  public getPlayedYears(userIds: string[]): Map<string, Set<number>> {
-    const result = new Map<string, Set<number>>();
-    for (const id of userIds) result.set(id, new Set<number>());
-    if (userIds.length === 0) return result;
-
-    const placeholders = userIds.map(() => '?').join(',');
-    const stmt = this.db.prepare(
-      `SELECT user_id, year, rounds_json FROM history_records WHERE user_id IN (${placeholders})`
-    );
-    const rows = stmt.all(...userIds) as unknown as Array<{
-      user_id: string;
-      year: number;
-      rounds_json: string | null;
-    }>;
-
-    for (const row of rows) {
-      const set = result.get(row.user_id);
-      if (!set) continue;
-      if (typeof row.year === 'number') set.add(row.year);
-      if (row.rounds_json) {
-        try {
-          const rounds = JSON.parse(row.rounds_json) as Array<{ year?: number }>;
-          for (const r of rounds) {
-            if (typeof r?.year === 'number') set.add(r.year);
-          }
-        } catch {
-          /* ignore malformed round payloads */
-        }
-      }
-    }
-    return result;
-  }
-
-  // --- Long-match snapshots (only written for series longer than 90 minutes) ---
-
-  public saveMatchSnapshot(roomCode: string, payloadJson: string): void {
-    const stmt = this.db.prepare(`
-      INSERT INTO match_snapshots (room_code, payload_json, updated_at)
-      VALUES (?, ?, ?)
-      ON CONFLICT(room_code) DO UPDATE SET
-        payload_json = excluded.payload_json,
-        updated_at = excluded.updated_at
-    `);
-    stmt.run(roomCode, payloadJson, Date.now());
-  }
-
-  public loadMatchSnapshots(): MatchSnapshotRow[] {
-    const stmt = this.db.prepare(`SELECT * FROM match_snapshots`);
-    return stmt.all() as unknown as MatchSnapshotRow[];
-  }
-
-  public deleteMatchSnapshot(roomCode: string): void {
-    const stmt = this.db.prepare(`DELETE FROM match_snapshots WHERE room_code = ?`);
-    stmt.run(roomCode);
   }
 
   public clearUserHistory(userId: string): void {
