@@ -15,6 +15,16 @@ import { spawn } from 'child_process';
 import { WebSocket } from 'ws';
 import { generateUserToken } from '../src/server/auth.js';
 
+// --- multi-round protocol helpers -------------------------------------------------
+const findPlayer = (payload: any, id: string) =>
+  (payload?.players || []).find((p: any) => p.playerId === id);
+const findSpectator = (payload: any, id: string) =>
+  (payload?.spectators || []).find((s: any) => s.playerId === id);
+const playerCount = (payload: any) => (payload?.players || []).length;
+const isSummary = (msg: any) => msg?.type === 'room:summary';
+// ---------------------------------------------------------------------------------
+
+
 const PORT = 8895;
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 const WS_BASE = `ws://127.0.0.1:${PORT}/ws`;
@@ -130,7 +140,7 @@ async function run() {
     console.log('\n--- 1. Create a 4-Player Room ---');
     const createdMsg = await waitForMessage(
       ws1,
-      (m) => m.type === 'room:state' && m.payload?.maxPlayers === 4,
+      (m) => m.type === 'room:summary' && m.payload?.config?.maxPlayers === 4,
       '4P room creation',
       5000,
       () =>
@@ -153,21 +163,21 @@ async function run() {
     console.log('\n--- 2. Join Players 2, 3, 4 and Explicit Spectator ---');
     await waitForMessage(
       ws2,
-      (m) => m.type === 'room:state' && Object.keys(m.payload.players).length === 2,
+      (m) => m.type === 'room:summary' && playerCount(m.payload) === 2,
       'P2 join',
       5000,
       () => ws2.send(JSON.stringify({ type: 'room:join', payload: { roomCode, nickname: '二号选手' } }))
     );
     await waitForMessage(
       ws3,
-      (m) => m.type === 'room:state' && Object.keys(m.payload.players).length === 3,
+      (m) => m.type === 'room:summary' && playerCount(m.payload) === 3,
       'P3 join',
       5000,
       () => ws3.send(JSON.stringify({ type: 'room:join', payload: { roomCode, nickname: '三号选手' } }))
     );
     await waitForMessage(
       ws4,
-      (m) => m.type === 'room:state' && Object.keys(m.payload.players).length === 4,
+      (m) => m.type === 'room:summary' && playerCount(m.payload) === 4,
       'P4 join',
       5000,
       () => ws4.send(JSON.stringify({ type: 'room:join', payload: { roomCode, nickname: '四号选手' } }))
@@ -177,7 +187,7 @@ async function run() {
     // Explicit spectator joins
     const specJoinMsg = await waitForMessage(
       wsSpec1,
-      (m) => m.type === 'room:state' && !!m.payload.spectators?.[spec1],
+      (m) => m.type === 'room:summary' && !!findSpectator(m.payload, spec1),
       'Spectator 1 join',
       5000,
       () =>
@@ -202,7 +212,7 @@ async function run() {
     );
     const overflowStatePromise = waitForMessage(
       wsOverflow,
-      (m) => m.type === 'room:state' && !!m.payload.spectators?.[overflowUser],
+      (m) => m.type === 'room:summary' && !!findSpectator(m.payload, overflowUser),
       'Overflow spectator state',
       5000
     );
@@ -218,7 +228,7 @@ async function run() {
     ]);
     assert(!!noticeMsg.payload?.message, `Received auto-spectator notice: "${noticeMsg.payload.message}"`);
     assert(
-      Object.keys(overflowStateMsg.payload.players).length === 4 &&
+      playerCount(overflowStateMsg.payload) === 4 &&
         Object.keys(overflowStateMsg.payload.spectators).length === 2,
       'Room has 4 players and 2 spectators'
     );
@@ -226,7 +236,7 @@ async function run() {
     console.log('\n--- 4. All 4 Players Ready -> Match Starts -> Spectator Sees Live Submissions ---');
     const matchStartPromise = waitForMessage(
       wsSpec1,
-      (m) => m.type === 'room:state' && m.payload.status === 'IN_PROGRESS',
+      (m) => m.type === 'room:summary' && m.payload.status === 'IN_PROGRESS',
       'Spectator sees match IN_PROGRESS',
       8000
     );
@@ -239,25 +249,51 @@ async function run() {
     await matchStartPromise;
     assert(true, '4-player match started and spectator transitioned to IN_PROGRESS');
 
-    // Player 1 and Player 3 submit answers to Segment 0
+    // Every player finishes on zeros in this test, so the series ties and the overtime
+    // vote opens. Decline it immediately instead of waiting out the 30s deadline.
+    wsSpec1.on('message', (raw: any) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (msg?.type === 'overtime:vote_started') {
+          ws1.send(JSON.stringify({ type: 'overtime:vote', payload: { agree: false } }));
+        }
+      } catch {}
+    });
+
+    // Player 1 submits to Segment 0. Live text now travels in `round:detail`, and a
+    // spectator receives it unfiltered (players would get it withheld until they finish).
     const specSeesP1SubPromise = waitForMessage(
       wsSpec1,
       (m) =>
-        m.type === 'room:state' &&
-        m.payload.players?.[p1]?.submissions?.[0]?.studentAnswer === '一号选手的第一题实时译文',
+        m.type === 'round:detail' &&
+        m.payload?.players?.some(
+          (p: any) => p.playerId === p1 && p.submissions?.[0]?.studentAnswer === '一号选手的第一题实时译文'
+        ),
       'Spectator receives P1 live submission',
+      5000
+    );
+    const specSeesP1Advance = waitForMessage(
+      wsSpec1,
+      (m) => m.type === 'room:summary' && findPlayer(m.payload, p1)?.currentSegmentIndex === 1,
+      'Spectator sees P1 progress',
       5000
     );
     ws1.send(
       JSON.stringify({
         type: 'segment:submit',
-        payload: { segmentIndex: 0, studentAnswer: '一号选手的第一题实时译文' },
+        payload: { roundIndex: 0, segmentIndex: 0, studentAnswer: '一号选手的第一题实时译文' },
       })
     );
-    const stateAfterP1 = await specSeesP1SubPromise;
+    const detailAfterP1 = await specSeesP1SubPromise;
+    await specSeesP1Advance;
+    const specViewOfP1 = detailAfterP1.payload.players.find((p: any) => p.playerId === p1);
     assert(
-      stateAfterP1.payload.players[p1].currentSegmentIndex === 1,
-      'Spectator sees P1 advanced to segment 2 (index 1) and sees P1 translation text in real-time'
+      specViewOfP1.submissions[0].studentAnswer === '一号选手的第一题实时译文',
+      'Spectator sees P1 translation text in real-time and P1 advanced to the next question'
+    );
+    assert(
+      (detailAfterP1.payload.withheldPlayerIds || []).length === 0,
+      'Spectator detail is never filtered (no withheld players)'
     );
 
     // Wait for match timeout & settlement (rankings generated)

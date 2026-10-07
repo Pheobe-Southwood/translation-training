@@ -2,6 +2,16 @@ import { spawn } from 'child_process';
 import { WebSocket } from 'ws';
 import { generateUserToken } from '../src/server/auth.js';
 
+// --- multi-round protocol helpers -------------------------------------------------
+const findPlayer = (payload: any, id: string) =>
+  (payload?.players || []).find((p: any) => p.playerId === id);
+const findSpectator = (payload: any, id: string) =>
+  (payload?.spectators || []).find((s: any) => s.playerId === id);
+const playerCount = (payload: any) => (payload?.players || []).length;
+const isSummary = (msg: any) => msg?.type === 'room:summary';
+// ---------------------------------------------------------------------------------
+
+
 async function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -56,7 +66,7 @@ async function testPairedPvp() {
 
       hostWs.on('message', (d) => {
         const msg = JSON.parse(d.toString());
-        if (msg.type === 'room:state' && !roomCode) {
+        if (msg.type === 'room:summary' && !roomCode) {
           roomCode = msg.payload.roomCode;
           console.log(`Room created: ${roomCode}`);
           guestWs.send(
@@ -65,10 +75,10 @@ async function testPairedPvp() {
               payload: { roomCode, nickname: '玩家B' },
             })
           );
-        } else if (msg.type === 'room:state' && Object.keys(msg.payload.players).length === 2 && !msg.payload.players[hostId]?.isReady) {
+        } else if (msg.type === 'room:summary' && playerCount(msg.payload) === 2 && !findPlayer(msg.payload, hostId)?.isReady) {
           hostWs.send(JSON.stringify({ type: 'room:toggle_ready' }));
           guestWs.send(JSON.stringify({ type: 'room:toggle_ready' }));
-        } else if (msg.type === 'room:state' && msg.payload.status === 'IN_PROGRESS') {
+        } else if (msg.type === 'room:summary' && msg.payload.status === 'IN_PROGRESS') {
           resolve();
         }
       });
@@ -81,6 +91,7 @@ async function testPairedPvp() {
       JSON.stringify({
         type: 'segment:submit',
         payload: {
+          roundIndex: 0,
           segmentIndex: 0,
           studentAnswer: '它们有时行进六十多英里去寻找食物或水源，而且非常擅长判断其他大象的位置。',
         },
@@ -95,13 +106,20 @@ async function testPairedPvp() {
     await new Promise<void>((resolve, reject) => {
       hostWs.on('message', (d) => {
         const msg = JSON.parse(d.toString());
-        if (msg.type === 'segment:paired_graded') {
-          console.log('\n[SUCCESS] segment:paired_graded event received!');
-          console.log('Student A Score:', msg.payload.studentA?.score);
-          console.log('Student B Score:', msg.payload.studentB?.score);
-          console.log('Comparative Analysis:', msg.payload.comparativeAnalysis);
-          pairedGradedEventReceived = true;
-          resolve();
+        // Batched paired grading now lands in `round:detail`: every player's answer for
+        // the same (round, segment) is graded in one call and both results appear together.
+        if (msg.type === 'round:detail' && msg.payload?.roundIndex === 0) {
+          const students = msg.payload.players || [];
+          const a = students.find((p: any) => p.playerId === hostId)?.submissions?.[0];
+          const b = students.find((p: any) => p.playerId === guestId)?.submissions?.[0];
+          if (a?.gradingStatus === 'graded' && b?.gradingStatus === 'graded') {
+            console.log('\n[SUCCESS] Batched paired grading results received!');
+            console.log('Student A Score:', a.gradingResult?.score);
+            console.log('Student B Score:', b.gradingResult?.score);
+            console.log('Comparative Analysis:', a.comparativeAnalysis || b.comparativeAnalysis);
+            pairedGradedEventReceived = true;
+            resolve();
+          }
         }
       });
 
@@ -109,6 +127,7 @@ async function testPairedPvp() {
         JSON.stringify({
           type: 'segment:submit',
           payload: {
+            roundIndex: 0,
             segmentIndex: 0,
             studentAnswer: '它们有时为了寻找食物或者水而跋涉超过60英里，非常善于辨别其他大象在何方，即便不在视线中。',
           },
@@ -122,7 +141,7 @@ async function testPairedPvp() {
     guestWs.close();
 
     if (!pairedGradedEventReceived) {
-      throw new Error('Did not receive segment:paired_graded event');
+      throw new Error('Did not receive batched paired grading results');
     }
 
     console.log('\n=== PAIRED GRADING END-TO-END TEST PASSED! ===');

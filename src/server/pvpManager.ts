@@ -6,31 +6,95 @@ import type {
   TranslationExam,
   SegmentSubmission,
   HistorySessionRecord,
+  HistoryRoundRecord,
+  RoomConfig,
+  RoundState,
+  RoundPlayerState,
+  RoundScoreEntry,
+  RoundDetail,
+  RoundDetailPlayer,
+  PvpRoomSummary,
+  PvpRoomSummaryPlayer,
+  PvpRoomSummaryRound,
+  DrawStrategy,
 } from '../shared/types.js';
-import { getExamByYear, getRandomExam } from './examService.js';
-import { gradeTranslation, gradePvpPairTranslation } from './deepseek.js';
+import { getAllExams, getExamByYear } from './examService.js';
+import { gradePvpBatchTranslation, type BatchAnswerInput } from './deepseek.js';
 import { db } from './db.js';
+import {
+  settleRound,
+  rankPlayers,
+  tiedLeaders,
+  resolveOvertime,
+  drawScheduledYears,
+  poolSize,
+  type Standing,
+} from '../shared/scoring.js';
+
+const SEGMENTS_PER_ROUND = 5;
+const COUNTDOWN_SECONDS = 3;
+const OVERTIME_VOTE_SECONDS = 30;
+const SWEEP_INTERVAL_MS = 1000;
+/** 3 attempts x 90s timeout + backoff, with headroom. */
+const GRADING_STUCK_MS = 300_000;
+const LONG_MATCH_MINUTES = 90;
 
 interface ConnectedClient {
   ws: WebSocket;
   playerId: string;
   roomCode?: string;
   isSpectator?: boolean;
+  /** Round the client is currently looking at (players follow their own round). */
+  watchingRound?: number;
+}
+
+interface CreateRoomPayload {
+  nickname: string;
+  /** Legacy single-round field, still accepted for compatibility. */
+  year?: number;
+  durationMinutes?: number;
+  maxPlayers?: number;
+  allowSpectators?: boolean;
+  totalRounds?: number;
+  drawStrategy?: DrawStrategy;
+  rangeStart?: number;
+  rangeEnd?: number;
+  customYears?: number[];
 }
 
 class PvpManager {
   private rooms: Map<string, PvpRoomState> = new Map();
-  private clients: Map<string, ConnectedClient> = new Map(); // playerId -> ConnectedClient
-  private playerSockets: Map<string, WebSocket> = new Map(); // playerId -> ws
-  private matchTimers: Map<string, NodeJS.Timeout> = new Map(); // roomCode -> Timer
-  private guardrailTimers: Map<string, NodeJS.Timeout> = new Map(); // roomCode -> Timer
+  private clients: Map<string, ConnectedClient> = new Map();
+  private playerSockets: Map<string, WebSocket> = new Map();
+  /** roomCode -> overtime vote timeout handle */
+  private voteTimers: Map<string, NodeJS.Timeout> = new Map();
+  private sweepHandle?: NodeJS.Timeout;
 
   constructor() {
-    // Periodic cleanup of truly abandoned rooms (runs every 5 minutes)
-    setInterval(() => {
-      this.cleanupStaleRooms();
-    }, 5 * 60 * 1000);
+    // A single 1s sweep drives every round deadline and overtime vote deadline.
+    // Using absolute `roundDeadlineAt` values instead of per-player setTimeout handles
+    // means deadlines survive snapshot restore unchanged and can never leak.
+    this.sweepHandle = setInterval(() => {
+      try {
+        this.sweep();
+      } catch (err) {
+        console.error('[PVP] Sweep failed:', err);
+      }
+    }, SWEEP_INTERVAL_MS);
+
+    setInterval(
+      () => {
+        this.cleanupStaleRooms();
+      },
+      5 * 60 * 1000
+    );
+
+    this.restoreSnapshots();
   }
+
+  // -------------------------------------------------------------------------
+  // Connection plumbing
+  // -------------------------------------------------------------------------
 
   public registerClient(playerId: string, ws: WebSocket) {
     const previousSocket = this.playerSockets.get(playerId);
@@ -45,38 +109,38 @@ class PvpManager {
     this.clients.set(playerId, { ws, playerId });
     this.playerSockets.set(playerId, ws);
 
-    // Check if user belongs to an existing active room (for auto-reconnect)
     const existingRoom = this.findRoomByPlayerId(playerId);
     if (existingRoom && existingRoom.status !== 'FINISHED') {
       const player = existingRoom.players[playerId];
       const spectator = existingRoom.spectators[playerId];
+      const client = this.clients.get(playerId);
 
       if (player) {
         player.isOnline = true;
         player.lastActiveAt = Date.now();
-        const client = this.clients.get(playerId);
         if (client) {
           client.roomCode = existingRoom.roomCode;
           client.isSpectator = false;
+          client.watchingRound = player.currentRoundIndex;
         }
-
         console.log(
           `[PVP] Re-associated socket for player "${player.nickname}" (${playerId}) in room ${existingRoom.roomCode} ` +
-            `(status=${existingRoom.status}, segment=${player.currentSegmentIndex + 1})`
+            `(status=${existingRoom.status}, round=${player.currentRoundIndex + 1}, segment=${player.currentSegmentIndex + 1})`
         );
-        this.broadcastRoomState(existingRoom.roomCode);
+        this.sendSummaryTo(playerId);
+        if (existingRoom.rounds[player.currentRoundIndex]) {
+          this.pushRoundDetail(playerId, player.currentRoundIndex);
+        }
       } else if (spectator) {
         spectator.isOnline = true;
-        const client = this.clients.get(playerId);
         if (client) {
           client.roomCode = existingRoom.roomCode;
           client.isSpectator = true;
         }
-
         console.log(
           `[PVP] Re-associated socket for spectator "${spectator.nickname}" (${playerId}) in room ${existingRoom.roomCode}`
         );
-        this.broadcastRoomState(existingRoom.roomCode);
+        this.broadcastSummary(existingRoom.roomCode);
       }
     }
 
@@ -131,6 +195,12 @@ class PvpManager {
       case 'segment:submit':
         this.submitSegment(playerId, payload);
         break;
+      case 'round:request':
+        this.requestRound(playerId, payload);
+        break;
+      case 'overtime:vote':
+        this.handleOvertimeVote(playerId, payload);
+        break;
       case 'room:leave':
         this.leaveRoom(playerId);
         break;
@@ -142,8 +212,81 @@ class PvpManager {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // Small helpers
+  // -------------------------------------------------------------------------
+
+  private allPlayers(room: PvpRoomState): PlayerState[] {
+    return Object.values(room.players);
+  }
+
+  private activePlayers(room: PvpRoomState): PlayerState[] {
+    return this.allPlayers(room).filter((p) => p.phase !== 'left');
+  }
+
+  private durationSeconds(room: PvpRoomState): number {
+    return room.config.durationMinutes * 60;
+  }
+
+  private availableYears(): number[] {
+    return getAllExams()
+      .map((e) => e.year)
+      .sort((a, b) => a - b);
+  }
+
+  private refreshTotals(room: PvpRoomState, player: PlayerState) {
+    let total = 0;
+    for (const round of room.rounds) {
+      const rp = round.players[player.playerId];
+      if (rp && rp.roundCompletedAt) total += rp.smallScore;
+    }
+    player.totalScore = Math.round(total * 10) / 10;
+  }
+
+  private lowestUnanswered(rp: RoundPlayerState): number {
+    for (let i = 0; i < SEGMENTS_PER_ROUND; i++) {
+      if (!rp.submissions[i]) return i;
+    }
+    return SEGMENTS_PER_ROUND - 1;
+  }
+
+  private createTimeoutSubmission(exam: TranslationExam, idx: number): SegmentSubmission {
+    return {
+      segmentIndex: idx,
+      originalText: exam.translationSegments[idx] || '',
+      studentAnswer: '（超时未作答）',
+      gradingStatus: 'graded',
+      submittedAt: Date.now(),
+      gradingResult: {
+        score: 0,
+        points_breakdown: [],
+        distortion_deduction: 0,
+        fluency_deduction: 0,
+        critique: '该题超时未作答，得 0 分。',
+        reference_translation: '',
+        gradedAt: Date.now(),
+      },
+    };
+  }
+
+  private buildRoundPlayer(playerId: string): RoundPlayerState {
+    return { playerId, submissions: {}, timedOut: false, smallScore: 0 };
+  }
+
+  private recomputeSmallScore(rp: RoundPlayerState) {
+    let sum = 0;
+    for (let i = 0; i < SEGMENTS_PER_ROUND; i++) {
+      sum += rp.submissions[i]?.gradingResult?.score || 0;
+    }
+    rp.smallScore = Math.round(sum * 10) / 10;
+  }
+
+  // -------------------------------------------------------------------------
+  // Room creation & configuration
+  // -------------------------------------------------------------------------
+
   private generateRoomCode(): string {
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Avoid confusing chars like 0/O, 1/I
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     let code = '';
     do {
       code = '';
@@ -154,37 +297,98 @@ class PvpManager {
     return code;
   }
 
-  private createRoom(
-    playerId: string,
-    payload: {
-      nickname: string;
-      year?: number;
-      durationMinutes?: number;
-      maxPlayers?: number;
-      allowSpectators?: boolean;
-    }
-  ) {
-    const code = this.generateRoomCode();
+  /** Normalises a create/update payload into a validated RoomConfig. */
+  private buildConfig(
+    payload: Partial<CreateRoomPayload> & Record<string, any>,
+    previous?: RoomConfig
+  ): { config?: RoomConfig; error?: string } {
+    const years = this.availableYears();
+
     const duration =
-      payload.durationMinutes &&
-      ([10, 15, 20].includes(payload.durationMinutes) ||
-        (process.env.NODE_ENV === 'test' && payload.durationMinutes > 0))
+      payload.durationMinutes && [10, 15, 20].includes(payload.durationMinutes)
         ? payload.durationMinutes
-        : 15;
+        : payload.durationMinutes && process.env.NODE_ENV === 'test' && payload.durationMinutes > 0
+          ? payload.durationMinutes
+          : (previous?.durationMinutes ?? 15);
 
     const maxPlayers = [2, 3, 4].includes(payload.maxPlayers as number)
       ? (payload.maxPlayers as number)
-      : 2;
-    const allowSpectators = payload.allowSpectators !== false;
+      : (previous?.maxPlayers ?? 2);
 
-    let exam: TranslationExam | undefined;
-    if (payload.year) {
-      exam = getExamByYear(payload.year);
-    }
-    if (!exam) {
-      exam = getRandomExam();
+    const allowSpectators =
+      typeof payload.allowSpectators === 'boolean'
+        ? payload.allowSpectators
+        : (previous?.allowSpectators ?? true);
+
+    // Legacy single-round create payload: { year } with no strategy.
+    let drawStrategy: DrawStrategy = payload.drawStrategy ?? previous?.drawStrategy ?? 'random';
+    let rangeStart = payload.rangeStart ?? previous?.rangeStart;
+    let rangeEnd = payload.rangeEnd ?? previous?.rangeEnd;
+    let customYears = payload.customYears ?? previous?.customYears;
+
+    if (!payload.drawStrategy && payload.year && !previous) {
+      drawStrategy = 'custom';
+      customYears = [payload.year];
     }
 
+    const totalRounds =
+      typeof payload.totalRounds === 'number' && Number.isInteger(payload.totalRounds)
+        ? payload.totalRounds
+        : payload.year && !previous
+          ? 1
+          : (previous?.totalRounds ?? 1);
+
+    const size = poolSize(years, drawStrategy, { start: rangeStart, end: rangeEnd }, customYears);
+    if (totalRounds < 1 || totalRounds > size) {
+      return { error: `当前抽取策略可选真题共 ${size} 套，轮数必须在 1 ~ ${size} 之间` };
+    }
+    if (drawStrategy === 'range') {
+      if (rangeStart === undefined || rangeEnd === undefined) {
+        return { error: '请选择年份区间的起止年份' };
+      }
+      if (rangeStart > rangeEnd) {
+        return { error: '年份区间的起始年份不能晚于结束年份' };
+      }
+      if (size === 0) {
+        return { error: '所选年份区间内没有可用真题' };
+      }
+    }
+    if (drawStrategy === 'custom') {
+      const selected = customYears ?? [];
+      if (selected.length === 0) {
+        return { error: '请至少选择一套真题' };
+      }
+      if (new Set(selected).size !== selected.length) {
+        return { error: '手动指定的考卷存在重复年份' };
+      }
+      const missing = selected.filter((y) => !years.includes(y));
+      if (missing.length > 0) {
+        return { error: `题库中不存在这些年份：${missing.join('、')}` };
+      }
+    }
+
+    return {
+      config: {
+        totalRounds,
+        durationMinutes: duration,
+        maxPlayers,
+        allowSpectators,
+        drawStrategy,
+        rangeStart,
+        rangeEnd,
+        customYears,
+      },
+    };
+  }
+
+  private createRoom(playerId: string, payload: CreateRoomPayload) {
+    const built = this.buildConfig(payload);
+    if (!built.config) {
+      return this.sendError(playerId, built.error || '房间设置无效', 'INVALID_CONFIG');
+    }
+    const config = built.config;
+
+    const code = this.generateRoomCode();
     const hostPlayer: PlayerState = {
       playerId,
       nickname: (payload.nickname || '玩家1').trim().slice(0, 16),
@@ -192,24 +396,24 @@ class PvpManager {
       isReady: false,
       isOnline: true,
       lastActiveAt: Date.now(),
+      phase: 'playing',
+      currentRoundIndex: 0,
       currentSegmentIndex: 0,
-      submissions: {},
+      answeredSegments: [],
+      matchPoints: 0,
       totalScore: 0,
-      isFinished: false,
+      roundsCompleted: 0,
+      hasFinishedAllRounds: false,
     };
 
     const roomState: PvpRoomState = {
       roomCode: code,
-      year: exam.year,
-      exam,
-      durationMinutes: duration,
+      config,
       status: 'WAITING',
-      maxPlayers,
-      allowSpectators,
+      scheduledYears: [],
+      rounds: [],
       createdAt: Date.now(),
-      players: {
-        [playerId]: hostPlayer,
-      },
+      players: { [playerId]: hostPlayer },
       spectators: {},
     };
 
@@ -221,9 +425,11 @@ class PvpManager {
     }
 
     console.log(
-      `[PVP] Created room ${code} (maxPlayers=${maxPlayers}, spectators=${allowSpectators}) by ${hostPlayer.nickname} (${playerId}), Year: ${exam.year}`
+      `[PVP] Created room ${code} (rounds=${config.totalRounds}, strategy=${config.drawStrategy}, ` +
+        `duration=${config.durationMinutes}m, maxPlayers=${config.maxPlayers}, spectators=${config.allowSpectators}) ` +
+        `by ${hostPlayer.nickname} (${playerId})`
     );
-    this.broadcastRoomState(code);
+    this.broadcastSummary(code);
   }
 
   private joinRoom(
@@ -234,14 +440,15 @@ class PvpManager {
     const room = this.rooms.get(code);
 
     if (!room) {
-      console.warn(`[PVP] Room join failed, room not found: "${code}". Current active rooms: [${Array.from(this.rooms.keys()).join(', ')}]`);
-      return this.sendError(playerId, `未找到房间号：${code}（请检查房间号是否正确或已被房主解散）`);
+      console.warn(
+        `[PVP] Room join failed, room not found: "${code}". Current active rooms: [${Array.from(this.rooms.keys()).join(', ')}]`
+      );
+      return this.sendError(playerId, `未找到房间号：${code}（请检查房间号是否正确或已被房主解散）`, 'ROOM_NOT_FOUND');
     }
 
     const existingPlayer = room.players[playerId];
     const existingSpectator = room.spectators[playerId];
 
-    // Reconnecting / Rejoining participant
     if (existingPlayer) {
       existingPlayer.isOnline = true;
       existingPlayer.lastActiveAt = Date.now();
@@ -252,8 +459,12 @@ class PvpManager {
       if (client) {
         client.roomCode = code;
         client.isSpectator = false;
+        client.watchingRound = existingPlayer.currentRoundIndex;
       }
-      this.broadcastRoomState(code);
+      this.broadcastSummary(code);
+      if (room.rounds[existingPlayer.currentRoundIndex]) {
+        this.pushRoundDetail(playerId, existingPlayer.currentRoundIndex);
+      }
       return;
     }
 
@@ -267,16 +478,15 @@ class PvpManager {
         client.roomCode = code;
         client.isSpectator = true;
       }
-      this.broadcastRoomState(code);
+      this.broadcastSummary(code);
+      this.pushRoundDetail(playerId, this.spectatorRoundFor(room));
       return;
     }
 
-    // Explicit request to join as spectator
-    if (payload.asSpectator) {
-      if (room.allowSpectators === false) {
-        return this.sendError(playerId, '该房间未开启观战功能', 'SPECTATING_NOT_ALLOWED');
-      }
-      const nickname = (payload.nickname || `观众${Object.keys(room.spectators).length + 1}`).trim().slice(0, 16);
+    const seatSpectator = (message: string, asExplicit: boolean) => {
+      const nickname = (payload.nickname || `观众${Object.keys(room.spectators).length + 1}`)
+        .trim()
+        .slice(0, 16);
       room.spectators[playerId] = {
         playerId,
         nickname,
@@ -288,66 +498,39 @@ class PvpManager {
         client.roomCode = code;
         client.isSpectator = true;
       }
-      console.log(`[PVP] Player ${nickname} (${playerId}) joined room ${code} as spectator.`);
-      this.broadcastRoomState(code);
-      return;
+      if (!asExplicit) {
+        this.sendToPlayer(playerId, { type: 'room:joined_as_spectator', payload: { message } });
+      }
+      console.log(`[PVP] Player ${nickname} (${playerId}) seated as spectator in room ${code}.`);
+      this.broadcastSummary(code);
+      this.pushRoundDetail(playerId, this.spectatorRoundFor(room));
+    };
+
+    if (payload.asSpectator) {
+      if (room.config.allowSpectators === false) {
+        return this.sendError(playerId, '该房间未开启观战功能', 'SPECTATING_NOT_ALLOWED');
+      }
+      return seatSpectator('', true);
     }
 
-    // Attempting to join as player
-    // If match is already in progress or finished:
     if (room.status !== 'WAITING' && room.status !== 'READY') {
-      if (room.allowSpectators !== false) {
-        const nickname = (payload.nickname || `观众${Object.keys(room.spectators).length + 1}`).trim().slice(0, 16);
-        room.spectators[playerId] = {
-          playerId,
-          nickname,
-          isOnline: true,
-          joinedAt: Date.now(),
-        };
-        const client = this.clients.get(playerId);
-        if (client) {
-          client.roomCode = code;
-          client.isSpectator = true;
-        }
-        this.sendToPlayer(playerId, {
-          type: 'room:joined_as_spectator',
-          payload: { message: '对战已在进行中，已自动为您开启实时观战席位' },
-        });
-        console.log(`[PVP] Player ${nickname} (${playerId}) auto-joined room ${code} as spectator (match active).`);
-        this.broadcastRoomState(code);
-        return;
+      if (room.config.allowSpectators !== false) {
+        return seatSpectator('对战已在进行中，已自动为您开启实时观战席位', false);
       }
       return this.sendError(playerId, '对战已开始或已结束，无法加入', 'MATCH_ALREADY_STARTED');
     }
 
-    // Room is WAITING or READY: check player capacity
     const currentPlayerCount = Object.keys(room.players).length;
-    if (currentPlayerCount >= room.maxPlayers) {
-      if (room.allowSpectators !== false) {
-        const nickname = (payload.nickname || `观众${Object.keys(room.spectators).length + 1}`).trim().slice(0, 16);
-        room.spectators[playerId] = {
-          playerId,
-          nickname,
-          isOnline: true,
-          joinedAt: Date.now(),
-        };
-        const client = this.clients.get(playerId);
-        if (client) {
-          client.roomCode = code;
-          client.isSpectator = true;
-        }
-        this.sendToPlayer(playerId, {
-          type: 'room:joined_as_spectator',
-          payload: { message: `选手席位已满（上限 ${room.maxPlayers} 人），已自动为您转入观战席位` },
-        });
-        console.log(`[PVP] Player ${nickname} (${playerId}) auto-joined room ${code} as spectator (player capacity reached).`);
-        this.broadcastRoomState(code);
-        return;
+    if (currentPlayerCount >= room.config.maxPlayers) {
+      if (room.config.allowSpectators !== false) {
+        return seatSpectator(
+          `选手席位已满（上限 ${room.config.maxPlayers} 人），已自动为您转入观战席位`,
+          false
+        );
       }
-      return this.sendError(playerId, `房间已满（上限 ${room.maxPlayers} 人对战）`, 'ROOM_FULL');
+      return this.sendError(playerId, `房间已满（上限 ${room.config.maxPlayers} 人对战）`, 'ROOM_FULL');
     }
 
-    // New challenger player slot
     const playerNumber = currentPlayerCount + 1;
     const nickname = (payload.nickname || `玩家${playerNumber}`).trim().slice(0, 16);
     room.players[playerId] = {
@@ -357,10 +540,14 @@ class PvpManager {
       isReady: false,
       isOnline: true,
       lastActiveAt: Date.now(),
+      phase: 'playing',
+      currentRoundIndex: 0,
       currentSegmentIndex: 0,
-      submissions: {},
+      answeredSegments: [],
+      matchPoints: 0,
       totalScore: 0,
-      isFinished: false,
+      roundsCompleted: 0,
+      hasFinishedAllRounds: false,
     };
 
     const client = this.clients.get(playerId);
@@ -370,9 +557,9 @@ class PvpManager {
     }
 
     console.log(
-      `[PVP] Player ${nickname} (${playerId}) joined room ${code}. Total players: ${Object.keys(room.players).length}/${room.maxPlayers}`
+      `[PVP] Player ${nickname} (${playerId}) joined room ${code}. Total players: ${Object.keys(room.players).length}/${room.config.maxPlayers}`
     );
-    this.broadcastRoomState(code);
+    this.broadcastSummary(code);
   }
 
   private switchRole(playerId: string, payload: { targetRole: 'player' | 'spectator' }) {
@@ -387,10 +574,9 @@ class PvpManager {
 
     const { targetRole } = payload;
     if (targetRole === 'player') {
-      // Spectator switching to player
       if (!room.spectators[playerId]) return;
-      if (Object.keys(room.players).length >= room.maxPlayers) {
-        return this.sendError(playerId, `选手席位已满（上限 ${room.maxPlayers} 人）`);
+      if (Object.keys(room.players).length >= room.config.maxPlayers) {
+        return this.sendError(playerId, `选手席位已满（上限 ${room.config.maxPlayers} 人）`);
       }
       const spec = room.spectators[playerId];
       delete room.spectators[playerId];
@@ -401,22 +587,25 @@ class PvpManager {
         isReady: false,
         isOnline: true,
         lastActiveAt: Date.now(),
+        phase: 'playing',
+        currentRoundIndex: 0,
         currentSegmentIndex: 0,
-        submissions: {},
+        answeredSegments: [],
+        matchPoints: 0,
         totalScore: 0,
-        isFinished: false,
+        roundsCompleted: 0,
+        hasFinishedAllRounds: false,
       };
       client.isSpectator = false;
       room.status = 'WAITING';
-      this.broadcastRoomState(room.roomCode);
+      this.broadcastSummary(room.roomCode);
     } else if (targetRole === 'spectator') {
-      // Player switching to spectator
       if (!room.players[playerId]) return;
-      if (room.allowSpectators === false) {
+      if (room.config.allowSpectators === false) {
         return this.sendError(playerId, '该房间未开启观战席');
       }
       const player = room.players[playerId];
-      const otherPlayers = Object.values(room.players).filter((p) => p.playerId !== playerId);
+      const otherPlayers = this.allPlayers(room).filter((p) => p.playerId !== playerId);
       if (player.isHost) {
         if (otherPlayers.length > 0) {
           otherPlayers[0].isHost = true;
@@ -433,7 +622,7 @@ class PvpManager {
       };
       client.isSpectator = true;
       room.status = 'WAITING';
-      this.broadcastRoomState(room.roomCode);
+      this.broadcastSummary(room.roomCode);
     }
   }
 
@@ -448,11 +637,10 @@ class PvpManager {
       return this.sendError(playerId, '只有房主可以提前开赛');
     }
 
-    const players = Object.values(room.players);
+    const players = this.activePlayers(room);
     if (players.length < 2) {
       return this.sendError(playerId, '至少需要 2 位选手才能开启比赛');
     }
-
     if (!players.every((p) => p.isReady)) {
       return this.sendError(playerId, '所有在场选手均需“准备就绪”才能开赛');
     }
@@ -463,15 +651,7 @@ class PvpManager {
     this.startCountdown(room);
   }
 
-  private updateRoomSettings(
-    playerId: string,
-    payload: {
-      year?: number;
-      durationMinutes?: number;
-      maxPlayers?: number;
-      allowSpectators?: boolean;
-    }
-  ) {
+  private updateRoomSettings(playerId: string, payload: Record<string, any>) {
     const client = this.clients.get(playerId);
     if (!client?.roomCode) return;
     const room = this.rooms.get(client.roomCode);
@@ -482,22 +662,9 @@ class PvpManager {
       return this.sendError(playerId, '只有房主可以更改房间设置');
     }
 
-    if (payload.year) {
-      const exam = getExamByYear(payload.year);
-      if (exam) {
-        room.year = exam.year;
-        room.exam = exam;
-      }
-    }
-
-    if (payload.durationMinutes && [10, 15, 20].includes(payload.durationMinutes)) {
-      room.durationMinutes = payload.durationMinutes;
-    }
-
+    // maxPlayers cannot drop below the people already seated.
     if (payload.maxPlayers && [2, 3, 4].includes(payload.maxPlayers)) {
-      if (payload.maxPlayers >= Object.keys(room.players).length) {
-        room.maxPlayers = payload.maxPlayers;
-      } else {
+      if (payload.maxPlayers < Object.keys(room.players).length) {
         return this.sendError(
           playerId,
           `当前已有 ${Object.keys(room.players).length} 名选手在场，无法将人数设为 ${payload.maxPlayers}`
@@ -505,11 +672,12 @@ class PvpManager {
       }
     }
 
-    if (typeof payload.allowSpectators === 'boolean') {
-      room.allowSpectators = payload.allowSpectators;
+    const built = this.buildConfig(payload, room.config);
+    if (!built.config) {
+      return this.sendError(playerId, built.error || '房间设置无效', 'INVALID_CONFIG');
     }
-
-    this.broadcastRoomState(client.roomCode);
+    room.config = built.config;
+    this.broadcastSummary(room.roomCode);
   }
 
   private toggleReady(playerId: string) {
@@ -517,7 +685,6 @@ class PvpManager {
     if (!client?.roomCode) return;
     const room = this.rooms.get(client.roomCode);
     if (!room) return;
-
     if (room.status !== 'WAITING' && room.status !== 'READY') return;
 
     const player = room.players[playerId];
@@ -526,22 +693,25 @@ class PvpManager {
     player.isReady = !player.isReady;
     player.lastActiveAt = Date.now();
 
-    const players = Object.values(room.players);
-    if (players.length >= 2 && players.length === room.maxPlayers && players.every((p) => p.isReady)) {
+    const players = this.activePlayers(room);
+    if (players.length >= 2 && players.length === room.config.maxPlayers && players.every((p) => p.isReady)) {
       this.startCountdown(room);
     } else {
       room.status = players.length >= 2 && players.every((p) => p.isReady) ? 'READY' : 'WAITING';
-      this.broadcastRoomState(room.roomCode);
+      this.broadcastSummary(room.roomCode);
     }
   }
 
+  // -------------------------------------------------------------------------
+  // Match start
+  // -------------------------------------------------------------------------
+
   private startCountdown(room: PvpRoomState) {
     room.status = 'COUNTDOWN';
-    const countdownSeconds = 3;
-    room.countdownEndTime = Date.now() + countdownSeconds * 1000;
-    this.broadcastRoomState(room.roomCode);
+    room.countdownEndTime = Date.now() + COUNTDOWN_SECONDS * 1000;
+    this.broadcastSummary(room.roomCode);
 
-    let remaining = countdownSeconds;
+    let remaining = COUNTDOWN_SECONDS;
     const timer = setInterval(() => {
       remaining -= 1;
       if (remaining > 0) {
@@ -557,190 +727,258 @@ class PvpManager {
   }
 
   private startMatch(room: PvpRoomState) {
-    room.status = 'IN_PROGRESS';
-    room.startedAt = Date.now();
-    const durationMs = room.durationMinutes * 60 * 1000;
-    room.matchEndTime = room.startedAt + durationMs;
+    const years = this.availableYears();
+    const drawn = drawScheduledYears(
+      years,
+      room.config.drawStrategy,
+      room.config.totalRounds,
+      {
+        range: { start: room.config.rangeStart, end: room.config.rangeEnd },
+        customYears: room.config.customYears,
+      }
+    );
+    if (drawn.error) {
+      room.status = 'WAITING';
+      console.error(`[PVP] Cannot start match in ${room.roomCode}: ${drawn.error}`);
+      for (const p of this.allPlayers(room)) {
+        this.sendError(p.playerId, drawn.error, 'INVALID_CONFIG');
+      }
+      this.broadcastSummary(room.roomCode);
+      return;
+    }
 
-    // Reset player submissions and indices
-    for (const p of Object.values(room.players)) {
+    const now = Date.now();
+    room.scheduledYears = drawn.years;
+    room.status = 'IN_PROGRESS';
+    room.startedAt = now;
+    room.winnerId = undefined;
+    room.rankings = undefined;
+    room.overtime = undefined;
+
+    // One RoundState per scheduled round; each pre-seeds a RoundPlayerState for every
+    // player so settlement and the "withdrawn player counts as 0" rule stay uniform.
+    // `startedAt` stays 0 until the round is actually entered, which is also what keeps
+    // the exam year hidden in the summary until that round begins.
+    room.rounds = drawn.years.map((year, index) => {
+      const exam = getExamByYear(year) as TranslationExam;
+      const players: Record<string, RoundPlayerState> = {};
+      for (const p of this.allPlayers(room)) {
+        players[p.playerId] = this.buildRoundPlayer(p.playerId);
+      }
+      const batches: RoundState['batches'] = {};
+      for (let i = 0; i < SEGMENTS_PER_ROUND; i++) {
+        batches[i] = { segmentIndex: i, status: 'waiting', attempts: 0 };
+      }
+      return {
+        roundIndex: index,
+        year,
+        isOvertime: false,
+        exam,
+        startedAt: index === 0 ? now : 0,
+        players,
+        batches,
+        settled: false,
+      };
+    });
+
+    const durationSec = this.durationSeconds(room);
+    for (const p of this.allPlayers(room)) {
+      p.currentRoundIndex = 0;
       p.currentSegmentIndex = 0;
-      p.submissions = {};
+      p.answeredSegments = [];
+      p.matchPoints = 0;
       p.totalScore = 0;
-      p.isFinished = false;
+      p.roundsCompleted = 0;
+      p.hasFinishedAllRounds = false;
+      p.finishedAt = undefined;
+      p.phase = 'playing';
+      p.roundStartedAt = now;
+      p.roundDeadlineAt = now + durationSec * 1000;
     }
 
     console.log(
-      `[PVP] Match started in room ${room.roomCode}, players: ${Object.keys(room.players).length}, duration: ${room.durationMinutes}m`
+      `[PVP] Match started in room ${room.roomCode}: ${room.config.totalRounds} rounds, ` +
+        `years=[${drawn.years.join(', ')}], duration=${room.config.durationMinutes}m, ` +
+        `players=${this.allPlayers(room).length}`
     );
-    this.broadcastRoomState(room.roomCode);
 
-    // Schedule match timeout
-    const timeout = setTimeout(() => {
-      this.handleMatchTimeout(room.roomCode);
-    }, durationMs);
-
-    this.matchTimers.set(room.roomCode, timeout);
+    this.broadcastSummary(room.roomCode);
+    this.broadcast(room.roomCode, {
+      type: 'round:started',
+      payload: { roundIndex: 0, year: drawn.years[0] },
+    });
+    for (const p of this.activePlayers(room)) {
+      this.pushRoundDetail(p.playerId, 0);
+    }
+    for (const s of Object.keys(room.spectators)) {
+      this.pushRoundDetail(s, 0);
+    }
   }
 
-  private handleMatchTimeout(roomCode: string) {
-    const room = this.rooms.get(roomCode);
-    if (!room || room.status === 'FINISHED') return;
+  // -------------------------------------------------------------------------
+  // Round progression
+  // -------------------------------------------------------------------------
 
-    console.log(`[PVP] Match timer expired for room ${roomCode}. Initiating timeout settlement...`);
+  private requestRound(playerId: string, payload: { roundIndex?: number }) {
+    const client = this.clients.get(playerId);
+    if (!client?.roomCode) return;
+    const room = this.rooms.get(client.roomCode);
+    if (!room) return;
 
-    const timer = this.matchTimers.get(roomCode);
-    if (timer) {
-      clearTimeout(timer);
-      this.matchTimers.delete(roomCode);
+    const roundIndex = Number(payload.roundIndex);
+    if (!Number.isInteger(roundIndex) || roundIndex < 0 || roundIndex >= room.rounds.length) {
+      return this.sendError(playerId, '轮次序号无效', 'INVALID_ROUND');
     }
 
-    const playerList = Object.values(room.players);
-    // 1. Lock all players from submitting further answers
-    for (const p of playerList) {
-      p.isFinished = true;
-      if (!p.finishedAt) {
-        p.finishedAt = Date.now();
+    const player = room.players[playerId];
+    if (player && player.phase !== 'left' && roundIndex > player.currentRoundIndex) {
+      return this.sendError(playerId, '该轮次尚未解锁', 'FORBIDDEN_ROUND');
+    }
+    if (!player && room.status !== 'FINISHED') {
+      // Spectators may watch any round that has actually started.
+      if (!room.rounds[roundIndex]?.startedAt) {
+        return this.sendError(playerId, '该轮次尚未开始', 'ROUND_NOT_STARTED');
       }
     }
 
-    if (playerList.length === 2) {
-      const p1 = playerList[0];
-      const p2 = playerList[1];
+    client.watchingRound = roundIndex;
+    this.pushRoundDetail(playerId, roundIndex);
+  }
 
-      for (let idx = 0; idx < 5; idx++) {
-        const sub1 = p1.submissions[idx];
-        const sub2 = p2.submissions[idx];
+  private enterRound(room: PvpRoomState, player: PlayerState, roundIndex: number) {
+    const now = Date.now();
+    const round = room.rounds[roundIndex];
+    if (!round) return;
 
-        // Case A: Neither player answered this segment
-        if (!sub1 && !sub2) {
-          p1.submissions[idx] = this.createTimeoutSubmission(room, idx);
-          p2.submissions[idx] = this.createTimeoutSubmission(room, idx);
-          continue;
-        }
+    player.currentRoundIndex = roundIndex;
+    player.answeredSegments = [];
+    player.currentSegmentIndex = 0;
+    player.roundStartedAt = now;
+    player.roundDeadlineAt = now + this.durationSeconds(room) * 1000;
+    if (!round.startedAt) round.startedAt = now;
 
-        // Case B: Player 1 answered, Player 2 did not
-        if (sub1 && !sub2) {
-          p2.submissions[idx] = {
-            segmentIndex: idx,
-            originalText: room.exam.translationSegments[idx] || '',
-            studentAnswer: '（超时未作答）',
-            gradingStatus: 'waiting_pair',
-            submittedAt: Date.now(),
-          };
-          if (sub1.gradingStatus === 'waiting_pair') {
-            this.triggerPairedGrading(room, idx, p1, p2);
-          }
-          continue;
-        }
+    console.log(
+      `[PVP] ${player.nickname} entered round ${roundIndex + 1}/${room.config.totalRounds} in room ${room.roomCode}`
+    );
 
-        // Case C: Player 2 answered, Player 1 did not
-        if (!sub1 && sub2) {
-          p1.submissions[idx] = {
-            segmentIndex: idx,
-            originalText: room.exam.translationSegments[idx] || '',
-            studentAnswer: '（超时未作答）',
-            gradingStatus: 'waiting_pair',
-            submittedAt: Date.now(),
-          };
-          if (sub2.gradingStatus === 'waiting_pair') {
-            this.triggerPairedGrading(room, idx, p1, p2);
-          }
-          continue;
-        }
+    const client = this.clients.get(player.playerId);
+    if (client) client.watchingRound = roundIndex;
 
-        // Case D: Both submitted, but in waiting_pair status
-        if (sub1 && sub2) {
-          if (sub1.gradingStatus === 'waiting_pair' || sub2.gradingStatus === 'waiting_pair') {
-            this.triggerPairedGrading(room, idx, p1, p2);
-          }
+    this.sendToPlayer(player.playerId, {
+      type: 'round:started',
+      payload: { roundIndex, year: round.year, deadlineAt: player.roundDeadlineAt },
+    });
+    this.broadcastSummary(room.roomCode);
+    this.pushRoundDetail(player.playerId, roundIndex);
+  }
+
+  /** Marks the player's current round complete and pipelines them into the next one. */
+  private completeRoundForPlayer(room: PvpRoomState, player: PlayerState, timedOut: boolean) {
+    const roundIndex = player.currentRoundIndex;
+    const round = room.rounds[roundIndex];
+    if (!round) return;
+    const rp = round.players[player.playerId];
+    if (!rp || rp.roundCompletedAt) return;
+
+    const now = Date.now();
+    const durationSec = this.durationSeconds(room);
+
+    if (timedOut) {
+      for (let i = 0; i < SEGMENTS_PER_ROUND; i++) {
+        if (!rp.submissions[i]) {
+          rp.submissions[i] = this.createTimeoutSubmission(round.exam, i);
         }
       }
+      rp.timedOut = true;
+      rp.elapsedSeconds = durationSec;
+      rp.remainingSeconds = 0;
     } else {
-      // 3 or 4 players timeout handling
-      for (const p of playerList) {
-        for (let idx = 0; idx < 5; idx++) {
-          const sub = p.submissions[idx];
-          if (!sub) {
-            p.submissions[idx] = this.createTimeoutSubmission(room, idx);
-          } else if (sub.gradingStatus === 'waiting_pair') {
-            this.triggerIndividualGrading(room, idx, p);
-          }
+      for (let i = 0; i < SEGMENTS_PER_ROUND; i++) {
+        if (!rp.submissions[i]) {
+          rp.submissions[i] = this.createTimeoutSubmission(round.exam, i);
         }
+      }
+      const elapsed = Math.max(0, Math.round((now - (player.roundStartedAt ?? now)) / 1000));
+      rp.timedOut = false;
+      rp.elapsedSeconds = Math.min(elapsed, durationSec);
+      rp.remainingSeconds = Math.max(0, durationSec - rp.elapsedSeconds);
+    }
+
+    rp.roundCompletedAt = now;
+    this.recomputeSmallScore(rp);
+    player.roundsCompleted = Math.max(player.roundsCompleted, roundIndex + 1);
+    this.refreshTotals(room, player);
+
+    // A player who timed out (or quit) has just handed in zero-score placeholders for
+    // the segments they skipped. Those may be the last missing piece of a batch, so
+    // every segment has to be re-examined now.
+    for (let i = 0; i < SEGMENTS_PER_ROUND; i++) {
+      this.maybeTriggerBatch(room, roundIndex, i);
+    }
+
+    console.log(
+      `[PVP] ${player.nickname} completed round ${roundIndex + 1} in room ${room.roomCode} ` +
+        `(${rp.smallScore}p, ${rp.timedOut ? 'timed out' : `${rp.elapsedSeconds}s used`})`
+    );
+
+    // Pipelines: the next round starts for this player immediately, independent of others.
+    if (player.phase !== 'left') {
+      if (roundIndex + 1 < room.config.totalRounds) {
+        this.enterRound(room, player, roundIndex + 1);
+      } else {
+        player.phase = 'awaiting';
+        player.hasFinishedAllRounds = true;
+        player.finishedAt = now;
+        player.roundDeadlineAt = undefined;
+        console.log(`[PVP] ${player.nickname} finished all rounds in room ${room.roomCode}`);
       }
     }
 
-    // Broadcast updated room state (so players know all inputs are locked)
-    this.broadcastRoomState(room.roomCode);
-
-    // 120-second guardrail timer to prevent rooms getting permanently stuck
-    const guardrail = setTimeout(() => {
-      console.warn(`[PVP] Guardrail timeout reached (120s) for room ${roomCode}. Force-finishing match.`);
-      this.forceFinishHangingRoom(roomCode);
-    }, 120000);
-    this.guardrailTimers.set(roomCode, guardrail);
-
-    // Check if all grading is already complete
-    this.checkAllFinished(room);
+    this.broadcastSummary(room.roomCode);
+    this.checkRoundSettle(room, roundIndex);
+    this.checkMatchComplete(room);
   }
 
-  private createTimeoutSubmission(room: PvpRoomState, idx: number): SegmentSubmission {
-    return {
-      segmentIndex: idx,
-      originalText: room.exam.translationSegments[idx] || '',
-      studentAnswer: '（超时未作答）',
-      gradingStatus: 'graded',
-      submittedAt: Date.now(),
-      gradingResult: {
-        score: 0,
-        points_breakdown: [],
-        distortion_deduction: 0,
-        fluency_deduction: 0,
-        critique: '该题超时未作答，得 0 分。',
-        reference_translation: '',
-        gradedAt: Date.now(),
-      },
-    };
-  }
-
-  private forceFinishHangingRoom(roomCode: string) {
-    const room = this.rooms.get(roomCode);
-    if (!room || room.status === 'FINISHED') return;
-
-    for (const player of Object.values(room.players)) {
-      for (const sub of Object.values(player.submissions)) {
-        if (sub.gradingStatus === 'grading' || sub.gradingStatus === 'waiting_pair') {
-          sub.gradingStatus = 'error';
-          sub.error = '评分超时（网络故障或接口无响应）';
-        }
-      }
-    }
-
-    this.finishMatch(roomCode, 'timeout');
-  }
+  // -------------------------------------------------------------------------
+  // Submissions & batched grading
+  // -------------------------------------------------------------------------
 
   private submitSegment(
     playerId: string,
-    payload: { segmentIndex: number; studentAnswer: string }
+    payload: { roundIndex?: number; segmentIndex: number; studentAnswer: string }
   ) {
     const client = this.clients.get(playerId);
     if (!client?.roomCode) return;
     const room = this.rooms.get(client.roomCode);
     if (!room) return;
 
-    if (room.status !== 'IN_PROGRESS') {
+    if (room.status !== 'IN_PROGRESS' && room.status !== 'OVERTIME') {
       return this.sendError(playerId, '对战未在进行中，无法提交', 'NOT_IN_PROGRESS');
     }
 
     const player = room.players[playerId];
     if (!player) return;
+    if (player.phase !== 'playing') {
+      return this.sendError(playerId, '你已完成本次系列赛，无法继续提交', 'ALREADY_FINISHED');
+    }
 
-    if (player.isFinished) {
-      return this.sendError(playerId, '你已交卷，无法继续提交', 'ALREADY_FINISHED');
+    const roundIndex = payload.roundIndex === undefined ? player.currentRoundIndex : Number(payload.roundIndex);
+    if (!Number.isInteger(roundIndex) || roundIndex !== player.currentRoundIndex) {
+      return this.sendError(playerId, '轮次序号无效，请刷新页面后重试', 'INVALID_ROUND');
+    }
+
+    const round = room.rounds[roundIndex];
+    if (!round || round.settled) {
+      return this.sendError(playerId, '该轮已结算，无法提交', 'ROUND_SETTLED');
+    }
+
+    if (player.roundDeadlineAt && Date.now() >= player.roundDeadlineAt) {
+      this.completeRoundForPlayer(room, player, true);
+      return this.sendError(playerId, '本轮时间已到，已自动进入下一轮', 'ROUND_EXPIRED');
     }
 
     const segmentIdx = Number(payload.segmentIndex);
-    if (!Number.isInteger(segmentIdx) || segmentIdx < 0 || segmentIdx > 4) {
+    if (!Number.isInteger(segmentIdx) || segmentIdx < 0 || segmentIdx >= SEGMENTS_PER_ROUND) {
       console.warn(
         `[PVP] Invalid segment index ${JSON.stringify(payload.segmentIndex)} from player ${player.nickname} (${playerId}) in room ${room.roomCode}`
       );
@@ -752,324 +990,612 @@ class PvpManager {
       return this.sendError(playerId, '译文不能为空', 'EMPTY_ANSWER');
     }
 
-    // Idempotency: never overwrite an already accepted answer
-    const existingSubmission = player.submissions[segmentIdx];
-    if (existingSubmission && existingSubmission.gradingStatus !== 'error') {
+    const rp = round.players[player.playerId];
+    if (!rp) return;
+
+    // Idempotency: never overwrite an already accepted answer.
+    const existing = rp.submissions[segmentIdx];
+    if (existing && existing.gradingStatus !== 'error') {
       console.log(
-        `[PVP] Duplicate submit ignored for player ${player.nickname} (${playerId}) segment ${segmentIdx + 1} in room ${room.roomCode}`
+        `[PVP] Duplicate submit ignored for ${player.nickname} (${playerId}) round ${roundIndex + 1} segment ${segmentIdx + 1}`
       );
-      this.sendToPlayer(playerId, { type: 'room:state', payload: room });
+      this.pushRoundDetail(playerId, roundIndex);
       return;
     }
 
-    const originalText = room.exam.translationSegments[segmentIdx] || '';
-
+    const originalText = round.exam.translationSegments[segmentIdx] || '';
     player.lastActiveAt = Date.now();
-    player.submissions[segmentIdx] = {
+    rp.submissions[segmentIdx] = {
       segmentIndex: segmentIdx,
       originalText,
       studentAnswer: answer,
-      gradingStatus: 'waiting_pair',
+      gradingStatus: 'idle',
       submittedAt: Date.now(),
     };
 
-    // Advance player to next segment immediately so no blocking
-    player.currentSegmentIndex = Math.max(player.currentSegmentIndex, Math.min(segmentIdx + 1, 4));
-    if (segmentIdx === 4) {
-      player.isFinished = true;
-      player.finishedAt = Date.now();
+    if (!player.answeredSegments.includes(segmentIdx)) {
+      player.answeredSegments.push(segmentIdx);
+      player.answeredSegments.sort((a, b) => a - b);
     }
+    player.currentSegmentIndex = this.lowestUnanswered(rp);
 
     console.log(
-      `[PVP] Segment ${segmentIdx + 1} submitted by ${player.nickname} (${playerId}) in room ${room.roomCode} (len=${answer.length})`
+      `[PVP] R${roundIndex + 1}Q${segmentIdx + 1} submitted by ${player.nickname} (${playerId}) in room ${room.roomCode} (len=${answer.length})`
     );
 
-    const players = Object.values(room.players);
-    if (players.length === 2) {
-      // 2 players: paired grading
-      const opponent = players.find((p) => p.playerId !== playerId);
-      if (opponent && opponent.submissions[segmentIdx]) {
-        this.triggerPairedGrading(room, segmentIdx, player, opponent);
-      } else {
-        this.broadcastRoomState(room.roomCode);
-      }
-    } else {
-      // 3 or 4 players: trigger individual grading immediately so no player is blocked
-      this.triggerIndividualGrading(room, segmentIdx, player);
-    }
+    this.broadcastSummary(room.roomCode);
+    this.maybeTriggerBatch(room, roundIndex, segmentIdx);
 
-    // Safety net: if this submission completed the match, settle it.
-    this.checkAllFinished(room);
+    // Free navigation: the round only ends once all five segments are in.
+    const answeredAll = player.answeredSegments.length >= SEGMENTS_PER_ROUND;
+    if (answeredAll) {
+      this.completeRoundForPlayer(room, player, false);
+    } else {
+      this.pushRoundDetail(playerId, roundIndex);
+    }
   }
 
-  private triggerIndividualGrading(
-    room: PvpRoomState,
-    segmentIdx: number,
-    player: PlayerState
-  ) {
-    const sub = player.submissions[segmentIdx];
-    if (!sub) return;
-    if (sub.gradingStatus === 'grading' || sub.gradingStatus === 'graded') return;
+  /** Fires the batched paired evaluation for (round, segment) once every player is in. */
+  private maybeTriggerBatch(room: PvpRoomState, roundIndex: number, segmentIndex: number) {
+    const round = room.rounds[roundIndex];
+    if (!round) return;
+    const batch = round.batches[segmentIndex];
+    if (!batch) return;
+    if (batch.status === 'grading' || batch.status === 'graded' || batch.status === 'failed') return;
 
-    sub.gradingStatus = 'grading';
-    this.broadcastRoomState(room.roomCode);
+    const playerIds = Object.keys(round.players);
+    const missing = playerIds.filter((pid) => !round.players[pid].submissions[segmentIndex]);
+    if (missing.length > 0) return;
 
-    const targetSentence = room.exam.translationSegments[segmentIdx];
+    // Timeout placeholders already carry a 0 score and must not be sent to the model.
+    const needingGrading = playerIds.filter((pid) => {
+      const sub = round.players[pid].submissions[segmentIndex];
+      return sub.gradingStatus === 'idle' || sub.gradingStatus === 'error';
+    });
+
+    if (needingGrading.length === 0) {
+      batch.status = 'graded';
+      this.broadcast(room.roomCode, {
+        type: 'segment:graded',
+        payload: { roundIndex, segmentIndex, graded: playerIds.length },
+      });
+      this.checkRoundSettle(room, roundIndex);
+      this.checkMatchComplete(room);
+      return;
+    }
+
+    batch.status = 'grading';
+    batch.attempts += 1;
+    batch.startedAt = Date.now();
+
+    for (const pid of needingGrading) {
+      round.players[pid].submissions[segmentIndex].gradingStatus = 'grading';
+    }
+    this.broadcastSummary(room.roomCode);
+
+    const answers: BatchAnswerInput[] = needingGrading.map((pid) => {
+      const sub = round.players[pid].submissions[segmentIndex];
+      return {
+        playerId: pid,
+        nickname: room.players[pid]?.nickname || pid,
+        answer: sub.studentAnswer,
+      };
+    });
+
     console.log(
-      `[PVP Individual] Grading Segment ${segmentIdx + 1} for ${player.nickname} (${player.playerId}) in Room ${room.roomCode}`
+      `[PVP Batch] Grading room ${room.roomCode} R${roundIndex + 1}Q${segmentIndex + 1} for ${answers.length} player(s)`
     );
 
-    gradeTranslation({
-      fullArticle: room.exam.contentMarkdown,
-      targetSentence,
-      studentAnswer: sub.studentAnswer,
+    gradePvpBatchTranslation({
+      fullArticle: round.exam.contentMarkdown,
+      targetSentence: round.exam.translationSegments[segmentIndex],
+      answers,
     })
-      .then((result) => {
-        sub.gradingStatus = 'graded';
-        sub.gradingResult = result;
-
-        player.totalScore = Object.values(player.submissions).reduce(
-          (sum, s) => sum + (s.gradingResult?.score || 0),
-          0
-        );
+      .then((outcome) => {
+        for (const student of outcome.students) {
+          const sub = round.players[student.playerId]?.submissions[segmentIndex];
+          if (!sub) continue;
+          sub.gradingStatus = 'graded';
+          sub.gradingResult = student.result;
+          if (outcome.comparativeAnalysis) sub.comparativeAnalysis = outcome.comparativeAnalysis;
+        }
+        for (const pid of playerIds) {
+          this.recomputeSmallScore(round.players[pid]);
+          const p = room.players[pid];
+          if (p) this.refreshTotals(room, p);
+        }
+        batch.status = 'graded';
 
         console.log(
-          `[PVP Individual] Scored Segment ${segmentIdx + 1} for ${player.nickname}: ${result.score}p (Total: ${player.totalScore.toFixed(1)})`
+          `[PVP Batch] R${roundIndex + 1}Q${segmentIndex + 1} graded in ${room.roomCode}: ` +
+            outcome.students
+              .map((s) => `${s.nickname} ${s.result.score}p`)
+              .join(' | ')
         );
 
         this.broadcast(room.roomCode, {
           type: 'segment:graded',
           payload: {
-            segmentIndex: segmentIdx,
-            playerId: player.playerId,
-            score: result.score,
-            gradingResult: result,
-            totalScore: player.totalScore,
+            roundIndex,
+            segmentIndex,
+            scores: outcome.students.map((s) => ({
+              playerId: s.playerId,
+              score: s.result.score,
+            })),
           },
         });
-
-        this.broadcastRoomState(room.roomCode);
-        this.checkAllFinished(room);
+        this.broadcastSummary(room.roomCode);
+        this.pushWatchedRound(room, roundIndex);
+        this.checkRoundSettle(room, roundIndex);
+        this.checkMatchComplete(room);
       })
       .catch((err) => {
-        console.error(`[PVP Individual] Grading failed for ${player.nickname}:`, err);
-        sub.gradingStatus = 'error';
-        sub.error = err.message || '评分服务出现暂时错误';
-
-        this.broadcastRoomState(room.roomCode);
-        this.checkAllFinished(room);
-      });
-  }
-
-  private triggerPairedGrading(
-    room: PvpRoomState,
-    segmentIdx: number,
-    playerA: PlayerState,
-    playerB: PlayerState
-  ) {
-    const subA = playerA.submissions[segmentIdx];
-    const subB = playerB.submissions[segmentIdx];
-    if (!subA || !subB) return;
-
-    const isSettled = (s: typeof subA) => s.gradingStatus === 'grading' || s.gradingStatus === 'graded';
-    if (isSettled(subA) || isSettled(subB)) return;
-
-    subA.gradingStatus = 'grading';
-    subB.gradingStatus = 'grading';
-    this.broadcastRoomState(room.roomCode);
-
-    const targetSentence = room.exam.translationSegments[segmentIdx];
-    console.log(`[PVP Pair] Triggering paired grading for Room ${room.roomCode}, Segment ${segmentIdx + 1}`);
-
-    gradePvpPairTranslation({
-      fullArticle: room.exam.contentMarkdown,
-      targetSentence,
-      studentAAnswer: subA.studentAnswer,
-      studentBAnswer: subB.studentAnswer,
-      studentAName: playerA.nickname,
-      studentBName: playerB.nickname,
-    })
-      .then((pairResult) => {
-        subA.gradingStatus = 'graded';
-        subA.gradingResult = pairResult.studentA;
-        subA.comparativeAnalysis = pairResult.comparativeAnalysis;
-
-        subB.gradingStatus = 'graded';
-        subB.gradingResult = pairResult.studentB;
-        subB.comparativeAnalysis = pairResult.comparativeAnalysis;
-
-        playerA.totalScore = Object.values(playerA.submissions).reduce(
-          (sum, s) => sum + (s.gradingResult?.score || 0),
-          0
-        );
-        playerB.totalScore = Object.values(playerB.submissions).reduce(
-          (sum, s) => sum + (s.gradingResult?.score || 0),
-          0
-        );
-
-        console.log(
-          `[PVP Pair] Scored Segment ${segmentIdx + 1} for ${playerA.nickname} (${pairResult.studentA.score}p) & ${playerB.nickname} (${pairResult.studentB.score}p)`
-        );
-
-        this.broadcast(room.roomCode, {
-          type: 'segment:paired_graded',
-          payload: {
-            segmentIndex: segmentIdx,
-            studentA: {
-              playerId: playerA.playerId,
-              score: pairResult.studentA.score,
-              gradingResult: pairResult.studentA,
-              totalScore: playerA.totalScore,
-            },
-            studentB: {
-              playerId: playerB.playerId,
-              score: pairResult.studentB.score,
-              gradingResult: pairResult.studentB,
-              totalScore: playerB.totalScore,
-            },
-            comparativeAnalysis: pairResult.comparativeAnalysis,
-          },
-        });
-
-        this.broadcastRoomState(room.roomCode);
-        this.checkAllFinished(room);
-      })
-      .catch((err) => {
-        console.error('[PVP Pair] Paired grading failed:', err);
-        subA.gradingStatus = 'error';
-        subA.error = err.message || '评分服务出现暂时错误';
-        subB.gradingStatus = 'error';
-        subB.error = err.message || '评分服务出现暂时错误';
-
-        this.broadcastRoomState(room.roomCode);
-        this.checkAllFinished(room);
-      });
-  }
-
-  private checkAllFinished(room: PvpRoomState) {
-    if (room.status === 'FINISHED') return;
-
-    const players = Object.values(room.players);
-    const allDone = players.every((p) => p.isFinished);
-    if (!allDone) return;
-
-    // Check if any submissions are still actively grading or waiting_pair
-    const anyPending = players.some((p) =>
-      Object.values(p.submissions).some((s) => s.gradingStatus === 'grading' || s.gradingStatus === 'waiting_pair')
-    );
-
-    if (!anyPending) {
-      const reason = room.matchEndTime && Date.now() >= room.matchEndTime ? 'timeout' : 'completed';
-      this.finishMatch(room.roomCode, reason);
-    }
-  }
-
-  private finishMatch(roomCode: string, reason: 'completed' | 'timeout') {
-    const room = this.rooms.get(roomCode);
-    if (!room || room.status === 'FINISHED') return;
-
-    const timer = this.matchTimers.get(roomCode);
-    if (timer) {
-      clearTimeout(timer);
-      this.matchTimers.delete(roomCode);
-    }
-
-    const guardrail = this.guardrailTimers.get(roomCode);
-    if (guardrail) {
-      clearTimeout(guardrail);
-      this.guardrailTimers.delete(roomCode);
-    }
-
-    const playerList = Object.values(room.players);
-
-    // Ensure all 5 segments exist for all players and total scores are accurately summed
-    for (const player of playerList) {
-      for (let idx = 0; idx < 5; idx++) {
-        if (!player.submissions[idx]) {
-          player.submissions[idx] = this.createTimeoutSubmission(room, idx);
+        console.error(`[PVP Batch] Grading failed in ${room.roomCode} R${roundIndex + 1}Q${segmentIndex + 1}:`, err);
+        const reason = err?.message || '评分服务出现暂时错误';
+        for (const pid of needingGrading) {
+          const sub = round.players[pid]?.submissions[segmentIndex];
+          if (!sub) continue;
+          sub.gradingStatus = 'graded';
+          sub.gradingResult = {
+            score: 0,
+            points_breakdown: [],
+            distortion_deduction: 0,
+            fluency_deduction: 0,
+            critique: `本题评分服务异常，按 0 分计（${reason}）`,
+            reference_translation: '',
+            gradedAt: Date.now(),
+          };
+          sub.error = reason;
         }
-      }
+        batch.status = 'failed';
 
-      player.totalScore = Object.values(player.submissions).reduce(
-        (sum, s) => sum + (s.gradingResult?.score || 0),
-        0
-      );
-    }
+        for (const pid of playerIds) {
+          this.recomputeSmallScore(round.players[pid]);
+          const p = room.players[pid];
+          if (p) this.refreshTotals(room, p);
+        }
+        this.broadcastSummary(room.roomCode);
+        this.pushWatchedRound(room, roundIndex);
+        this.checkRoundSettle(room, roundIndex);
+        this.checkMatchComplete(room);
+      });
+  }
 
-    room.status = 'FINISHED';
+  // -------------------------------------------------------------------------
+  // Round settlement
+  // -------------------------------------------------------------------------
 
-    // Calculate Leaderboard Rankings
-    const sorted = playerList.slice().sort((a, b) => b.totalScore - a.totalScore);
-    let currentRank = 1;
-    const rankings: PlayerRanking[] = sorted.map((p, idx, arr) => {
-      if (idx > 0 && p.totalScore < arr[idx - 1].totalScore) {
-        currentRank = idx + 1;
-      }
+  private checkRoundSettle(room: PvpRoomState, roundIndex: number) {
+    const round = room.rounds[roundIndex];
+    if (!round || round.settled) return;
+
+    const playerIds = Object.keys(round.players);
+    if (playerIds.length === 0) return;
+    if (playerIds.some((pid) => !round.players[pid].roundCompletedAt)) return;
+    if (Object.values(round.batches).some((b) => b.status === 'waiting' || b.status === 'grading')) return;
+
+    const entries = playerIds.map((pid) => {
+      const rp = round.players[pid];
+      this.recomputeSmallScore(rp);
       return {
-        playerId: p.playerId,
-        nickname: p.nickname,
-        totalScore: p.totalScore,
-        rank: currentRank,
-        isFinished: p.isFinished,
-        finishedAt: p.finishedAt,
+        playerId: pid,
+        smallScore: rp.smallScore,
+        remainingSeconds: rp.timedOut ? 0 : Math.max(0, rp.remainingSeconds ?? 0),
       };
     });
-    room.rankings = rankings;
 
-    if (sorted.length > 0) {
-      if (sorted.length > 1 && sorted[0].totalScore === sorted[1].totalScore) {
-        room.winnerId = 'draw';
-      } else {
-        room.winnerId = sorted[0].playerId;
+    const isFinalRound = !round.isOvertime && roundIndex === room.config.totalRounds - 1;
+    const scoreEntries: RoundScoreEntry[] = settleRound(entries, {
+      isFinalRound,
+      isOvertime: round.isOvertime,
+      onlyOneRound: room.config.totalRounds === 1,
+    });
+
+    if (round.isOvertime) {
+      this.applyOvertimeDecider(room, round, scoreEntries);
+    }
+
+    for (const entry of scoreEntries) {
+      const player = room.players[entry.playerId];
+      if (!player) continue;
+      player.matchPoints = Math.round((player.matchPoints + entry.matchPointsDelta) * 10) / 10;
+      this.refreshTotals(room, player);
+    }
+
+    round.settled = true;
+    round.settledAt = Date.now();
+    round.scoreEntries = scoreEntries;
+
+    console.log(
+      `[PVP] Round ${roundIndex + 1} settled in ${room.roomCode} (year ${round.year}): ` +
+        scoreEntries
+          .map(
+            (e) =>
+              `${room.players[e.playerId]?.nickname ?? e.playerId} ${e.smallScore}p ΔS=${e.deltaS.toFixed(2)} +${e.matchPointsDelta}`
+          )
+          .join(' | ')
+    );
+
+    this.broadcast(room.roomCode, {
+      type: 'round:settled',
+      payload: {
+        roundIndex,
+        year: round.year,
+        isOvertime: round.isOvertime,
+        scoreEntries,
+        matchPoints: Object.fromEntries(
+          this.allPlayers(room).map((p) => [p.playerId, p.matchPoints])
+        ),
+        totalScores: Object.fromEntries(
+          this.allPlayers(room).map((p) => [p.playerId, p.totalScore])
+        ),
+      },
+    });
+    this.broadcastSummary(room.roomCode);
+    this.pushWatchedRound(room, roundIndex);
+    this.maybeSnapshot(room);
+  }
+
+  /** Overtime is a flat +1.0 decided by score -> overtime time -> series time. */
+  private applyOvertimeDecider(
+    room: PvpRoomState,
+    round: RoundState,
+    scoreEntries: RoundScoreEntry[]
+  ) {
+    const seriesElapsed = (playerId: string) => {
+      let sum = 0;
+      for (const r of room.rounds) {
+        const rp = r.players[playerId];
+        if (rp?.roundCompletedAt) sum += rp.elapsedSeconds ?? 0;
       }
+      return sum;
+    };
+
+    const resolution = resolveOvertime(
+      Object.values(round.players).map((rp) => ({
+        playerId: rp.playerId,
+        smallScore: rp.smallScore,
+        overtimeElapsedSeconds: rp.timedOut ? Number.MAX_SAFE_INTEGER : (rp.elapsedSeconds ?? 0),
+        seriesElapsedSeconds: seriesElapsed(rp.playerId),
+      }))
+    );
+
+    round.overtimeResolution = resolution;
+
+    if (resolution.winnerId) {
+      const winner = scoreEntries.find((e) => e.playerId === resolution.winnerId);
+      if (winner) winner.matchPointsDelta = 1.0;
+      console.log(
+        `[PVP] Overtime decider in ${room.roomCode}: ${room.players[resolution.winnerId]?.nickname} wins (+1.0) via ${resolution.reason}`
+      );
+    } else {
+      console.log(`[PVP] Overtime decider in ${room.roomCode} ended in a draw`);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Match completion, overtime vote, final ranking
+  // -------------------------------------------------------------------------
+
+  private checkMatchComplete(room: PvpRoomState) {
+    if (room.status === 'FINISHED' || room.status === 'OVERTIME_VOTE') return;
+
+    if (room.status === 'OVERTIME') {
+      const decider = room.rounds.find((r) => r.isOvertime);
+      if (!decider || !decider.settled) return;
+      if (this.allPlayers(room).some((p) => p.phase === 'playing')) return;
+      const ranked = rankPlayers(this.standingsOf(room));
+      this.finishSeries(room, ranked, `加赛决胜（${decider.overtimeResolution?.reason ?? 'draw'}）`);
+      return;
+    }
+
+    if (room.status !== 'IN_PROGRESS') return;
+
+    const scheduled = room.rounds.filter((r) => !r.isOvertime);
+    if (scheduled.length < room.config.totalRounds) return;
+    if (!scheduled.every((r) => r.settled)) return;
+    if (this.allPlayers(room).some((p) => p.phase === 'playing')) return;
+
+    this.finalizeMatch(room);
+  }
+
+  private standingsOf(room: PvpRoomState): Standing[] {
+    return this.allPlayers(room).map((p) => ({
+      playerId: p.playerId,
+      nickname: p.nickname,
+      matchPoints: p.matchPoints,
+      totalScore: p.totalScore,
+      isFinished: p.hasFinishedAllRounds || p.phase === 'left',
+      finishedAt: p.finishedAt,
+    }));
+  }
+
+  private finalizeMatch(room: PvpRoomState) {
+    const standings = this.standingsOf(room);
+    const tied = tiedLeaders(standings);
+
+    if (tied.length > 0) {
+      this.startOvertimeVote(room, tied);
+      return;
+    }
+
+    const ranked = rankPlayers(standings);
+    this.finishSeries(room, ranked, '无并列，按大比分与小分直接排名');
+  }
+
+  private startOvertimeVote(room: PvpRoomState, participants: string[]) {
+    room.status = 'OVERTIME_VOTE';
+    room.overtime = {
+      participants,
+      deadlineAt: Date.now() + OVERTIME_VOTE_SECONDS * 1000,
+      votes: {},
+    };
+
+    console.log(
+      `[PVP] Room ${room.roomCode} is tied at the top — starting overtime vote with ` +
+        participants.map((p) => room.players[p]?.nickname ?? p).join(', ')
+    );
+
+    this.broadcastSummary(room.roomCode);
+    this.broadcast(room.roomCode, {
+      type: 'overtime:vote_started',
+      payload: {
+        participants,
+        deadlineAt: room.overtime.deadlineAt,
+        seconds: OVERTIME_VOTE_SECONDS,
+      },
+    });
+
+    const existing = this.voteTimers.get(room.roomCode);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      const current = this.rooms.get(room.roomCode);
+      if (!current || current.status !== 'OVERTIME_VOTE') return;
+      console.log(`[PVP] Overtime vote in ${room.roomCode} timed out — settling as a draw`);
+      this.resolveOvertimeAsDraw(current, '投票超时');
+    }, OVERTIME_VOTE_SECONDS * 1000);
+    this.voteTimers.set(room.roomCode, timer);
+  }
+
+  private handleOvertimeVote(playerId: string, payload: { agree?: boolean }) {
+    const client = this.clients.get(playerId);
+    if (!client?.roomCode) return;
+    const room = this.rooms.get(client.roomCode);
+    if (!room || room.status !== 'OVERTIME_VOTE' || !room.overtime) return;
+
+    const { participants, votes } = room.overtime;
+    if (!participants.includes(playerId)) {
+      return this.sendError(playerId, '你不是并列领先者，无法参与加赛投票', 'NOT_A_PARTICIPANT');
+    }
+    if (votes[playerId]) return;
+
+    votes[playerId] = payload.agree ? 'yes' : 'no';
+    console.log(
+      `[PVP] Overtime vote in ${room.roomCode}: ${room.players[playerId]?.nickname} voted ${votes[playerId]}`
+    );
+
+    this.broadcast(room.roomCode, {
+      type: 'overtime:vote_update',
+      payload: { votes, participants, deadlineAt: room.overtime.deadlineAt },
+    });
+    this.broadcastSummary(room.roomCode);
+
+    if (Object.values(votes).includes('no')) {
+      return this.resolveOvertimeAsDraw(room, '有选手拒绝加赛');
+    }
+    if (participants.every((pid) => votes[pid] === 'yes')) {
+      return this.startOvertimeRound(room);
+    }
+  }
+
+  private clearVoteTimer(roomCode: string) {
+    const timer = this.voteTimers.get(roomCode);
+    if (timer) {
+      clearTimeout(timer);
+      this.voteTimers.delete(roomCode);
+    }
+  }
+
+  private resolveOvertimeAsDraw(room: PvpRoomState, reason: string) {
+    this.clearVoteTimer(room.roomCode);
+    if (room.overtime) {
+      room.overtime.resolvedReason = reason;
+      room.status = 'OVERTIME_VOTE';
+    }
+    const ranked = rankPlayers(this.standingsOf(room));
+    console.log(`[PVP] Room ${room.roomCode} finished as a draw: ${reason}`);
+    this.finishSeries(room, ranked, reason);
+  }
+
+  private drawOvertimeExam(room: PvpRoomState): { year: number; exam: TranslationExam } {
+    const years = this.availableYears();
+    const used = new Set(room.scheduledYears);
+    const participants = room.overtime?.participants ?? Object.keys(room.players);
+
+    // 1) an exam nobody in the room has ever played and that this series has not used
+    let played = new Map<string, Set<number>>();
+    try {
+      played = db.getPlayedYears(participants);
+    } catch (err) {
+      console.warn('[PVP] getPlayedYears failed, falling back to series-local pool:', err);
+    }
+    const unseen = years.filter((y) => {
+      if (used.has(y)) return false;
+      return participants.every((pid) => !played.get(pid)?.has(y));
+    });
+
+    // 2) any exam this series has not used
+    const fresh = years.filter((y) => !used.has(y));
+
+    // 3) the whole bank
+    const pick = <T>(pool: T[]): T => pool[Math.floor(Math.random() * pool.length)];
+    const year = unseen.length > 0 ? pick(unseen) : fresh.length > 0 ? pick(fresh) : pick(years);
+    const exam = getExamByYear(year) as TranslationExam;
+    console.log(
+      `[PVP] Overtime exam for ${room.roomCode}: ${year} ` +
+        `(unseen=${unseen.length}, unused-in-series=${fresh.length})`
+    );
+    return { year, exam };
+  }
+
+  private startOvertimeRound(room: PvpRoomState) {
+    if (!room.overtime) return;
+    this.clearVoteTimer(room.roomCode);
+
+    const participants = room.overtime.participants.filter((pid) => room.players[pid]);
+    if (participants.length < 2) {
+      return this.resolveOvertimeAsDraw(room, '可参赛选手不足');
+    }
+
+    const { year, exam } = this.drawOvertimeExam(room);
+    room.overtimeYear = year;
+    room.overtime.startedAt = Date.now();
+
+    const batches: RoundState['batches'] = {};
+    for (let i = 0; i < SEGMENTS_PER_ROUND; i++) {
+      batches[i] = { segmentIndex: i, status: 'waiting', attempts: 0 };
+    }
+    const players: Record<string, RoundPlayerState> = {};
+    for (const pid of participants) players[pid] = this.buildRoundPlayer(pid);
+
+    const round: RoundState = {
+      roundIndex: room.config.totalRounds,
+      year,
+      isOvertime: true,
+      exam,
+      startedAt: Date.now(),
+      players,
+      batches,
+      settled: false,
+    };
+    room.rounds[room.config.totalRounds] = round;
+    room.status = 'OVERTIME';
+
+    const now = Date.now();
+    for (const pid of participants) {
+      const p = room.players[pid];
+      p.phase = 'playing';
+      p.hasFinishedAllRounds = false;
+      p.finishedAt = undefined;
+      p.currentRoundIndex = room.config.totalRounds;
+      p.currentSegmentIndex = 0;
+      p.answeredSegments = [];
+      p.roundStartedAt = now;
+      p.roundDeadlineAt = now + this.durationSeconds(room) * 1000;
+      const client = this.clients.get(pid);
+      if (client) client.watchingRound = round.roundIndex;
     }
 
     console.log(
-      `[PVP] Match ended in room ${roomCode}, winner: ${room.winnerId}, reason: ${reason}, scores: ${playerList
-        .map((p) => `${p.nickname}: ${p.totalScore.toFixed(1)}`)
-        .join(' | ')}`
+      `[PVP] Overtime round started in ${room.roomCode} on year ${year} with ` +
+        participants.map((p) => room.players[p]?.nickname ?? p).join(', ')
     );
 
-    // Authoritative Server-side persistence to SQLite
-    for (const player of playerList) {
-      const myRankObj = rankings.find((r) => r.playerId === player.playerId);
-      const myRank = myRankObj ? myRankObj.rank : 1;
+    this.broadcast(room.roomCode, {
+      type: 'overtime:resolved',
+      payload: { agreed: true, year, roundIndex: round.roundIndex },
+    });
+    this.broadcastSummary(room.roomCode);
+    this.broadcast(room.roomCode, {
+      type: 'round:started',
+      payload: { roundIndex: round.roundIndex, year, isOvertime: true },
+    });
+    for (const pid of participants) this.pushRoundDetail(pid, round.roundIndex);
+    for (const sid of Object.keys(room.spectators)) this.pushRoundDetail(sid, round.roundIndex);
+  }
+
+  private finishSeries(room: PvpRoomState, ranked: PlayerRanking[], reason: string) {
+    room.status = 'FINISHED';
+    room.rankings = ranked;
+    const top = ranked.filter((r) => r.rank === 1);
+    room.winnerId = top.length === 1 ? top[0].playerId : 'draw';
+    this.clearVoteTimer(room.roomCode);
+
+    console.log(
+      `[PVP] Series finished in room ${room.roomCode} (${reason}). Winner: ${room.winnerId}. ` +
+        ranked
+          .map((r) => `${r.nickname} MP=${r.matchPoints} PTS=${r.totalScore} rank=${r.rank}`)
+          .join(' | ')
+    );
+
+    this.persistSeries(room, ranked);
+
+    this.broadcast(room.roomCode, {
+      type: 'match:ended',
+      payload: {
+        winnerId: room.winnerId,
+        rankings: room.rankings,
+        reason,
+        wentOvertime: room.rounds.some((r) => r.isOvertime),
+        summary: this.summaryFor(room),
+      },
+    });
+    this.broadcastSummary(room.roomCode);
+  }
+
+  private persistSeries(room: PvpRoomState, ranked: PlayerRanking[]) {
+    const wentOvertime = room.rounds.some((r) => r.isOvertime);
+
+    for (const player of this.allPlayers(room)) {
+      const myRank = ranked.find((r) => r.playerId === player.playerId)?.rank ?? 1;
       const isWinner = myRank === 1 && room.winnerId === player.playerId;
       const isDraw = room.winnerId === 'draw' && myRank === 1;
       const outcome: 'win' | 'draw' | 'loss' = isWinner ? 'win' : isDraw ? 'draw' : 'loss';
 
-      const otherPlayers = playerList.filter((p) => p.playerId !== player.playerId);
-      const primaryOpponent = otherPlayers[0];
-
-      const deterministicId = `pvp-${room.roomCode}-${room.startedAt || room.createdAt || Date.now()}-${player.playerId}`;
-
-      const submissionsList: SegmentSubmission[] = [0, 1, 2, 3, 4].map((idx) => {
-        return (
-          player.submissions[idx] || this.createTimeoutSubmission(room, idx)
-        );
+      const roundsRecord: HistoryRoundRecord[] = room.rounds.map((round) => {
+        const rp = round.players[player.playerId];
+        const entry = round.scoreEntries?.find((e) => e.playerId === player.playerId);
+        const submissions: SegmentSubmission[] = [];
+        for (let i = 0; i < SEGMENTS_PER_ROUND; i++) {
+          submissions.push(
+            rp?.submissions[i] ??
+              this.createTimeoutSubmission(round.exam, i)
+          );
+        }
+        return {
+          roundIndex: round.roundIndex,
+          year: round.year,
+          isOvertime: round.isOvertime,
+          smallScore: rp?.smallScore ?? 0,
+          matchPointsDelta: entry?.matchPointsDelta ?? 0,
+          matchPointsAfter: player.matchPoints,
+          elapsedSeconds: rp?.elapsedSeconds ?? 0,
+          remainingSeconds: rp?.remainingSeconds ?? 0,
+          timedOut: rp?.timedOut ?? true,
+          submissions,
+          scoreEntries: round.scoreEntries,
+        };
       });
 
+      const flatSubmissions = roundsRecord.flatMap((r) => r.submissions);
+      const otherPlayers = this.allPlayers(room).filter((p) => p.playerId !== player.playerId);
+      const primaryOpponent = otherPlayers[0];
+
       const record: HistorySessionRecord = {
-        id: deterministicId,
+        id: `pvp-${room.roomCode}-${room.startedAt || room.createdAt || Date.now()}-${player.playerId}`,
         type: 'pvp',
-        year: room.year,
+        year: room.rounds[0]?.year ?? room.scheduledYears[0] ?? 0,
         timestamp: Date.now(),
         totalScore: player.totalScore,
-        timeSpentSeconds: room.startedAt
-          ? Math.floor((Date.now() - room.startedAt) / 1000)
-          : room.durationMinutes * 60,
-        submissions: submissionsList,
+        timeSpentSeconds: roundsRecord.reduce((sum, r) => sum + (r.elapsedSeconds || 0), 0),
+        submissions: flatSubmissions,
+        roundCount: room.config.totalRounds,
+        matchPoints: player.matchPoints,
+        wentOvertime,
+        rounds: roundsRecord,
         pvpDetails: primaryOpponent
           ? {
               opponentNickname: primaryOpponent.nickname,
               opponentScore: primaryOpponent.totalScore,
               outcome,
               rank: myRank,
-              playerCount: playerList.length,
-              leaderboard: rankings.map((r) => ({
+              playerCount: this.allPlayers(room).length,
+              finalMatchPoints: player.matchPoints,
+              leaderboard: ranked.map((r) => ({
                 nickname: r.nickname,
                 score: r.totalScore,
                 rank: r.rank,
+                matchPoints: r.matchPoints,
               })),
             }
           : undefined,
@@ -1078,25 +1604,336 @@ class PvpManager {
       try {
         db.saveHistoryRecord(player.playerId, record);
         console.log(
-          `[PVP] Authoritatively saved history record ${record.id} for player ${player.nickname} (${player.playerId})`
+          `[PVP] Saved ${room.config.totalRounds}-round history for ${player.nickname} (${player.playerId}) id=${record.id}`
         );
       } catch (err) {
         console.error(`[PVP] Failed to save history record for ${player.playerId}:`, err);
       }
     }
 
-    this.broadcast(roomCode, {
-      type: 'match:ended',
-      payload: {
-        winnerId: room.winnerId,
-        rankings: room.rankings,
-        reason,
-        roomState: room,
-      },
+    this.deleteSnapshot(room.roomCode);
+  }
+
+  // -------------------------------------------------------------------------
+  // Snapshots (only used for matches long enough to survive a restart)
+  // -------------------------------------------------------------------------
+
+  private isLongMatch(room: PvpRoomState): boolean {
+    return room.config.totalRounds * room.config.durationMinutes > LONG_MATCH_MINUTES;
+  }
+
+  private maybeSnapshot(room: PvpRoomState) {
+    if (!this.isLongMatch(room)) return;
+    if (room.status === 'FINISHED') return;
+    try {
+      room.snapshotAt = Date.now();
+      db.saveMatchSnapshot(room.roomCode, JSON.stringify(room));
+    } catch (err) {
+      console.error(`[PVP] Failed to snapshot room ${room.roomCode}:`, err);
+    }
+  }
+
+  private deleteSnapshot(roomCode: string) {
+    try {
+      db.deleteMatchSnapshot(roomCode);
+    } catch (err) {
+      console.error(`[PVP] Failed to delete snapshot for ${roomCode}:`, err);
+    }
+  }
+
+  private restoreSnapshots() {
+    let restored = 0;
+    try {
+      for (const row of db.loadMatchSnapshots()) {
+        try {
+          const room = JSON.parse(row.payload_json) as PvpRoomState;
+          if (!room || room.status === 'FINISHED' || !room.roomCode) {
+            db.deleteMatchSnapshot(row.room_code);
+            continue;
+          }
+          for (const p of Object.values(room.players)) {
+            p.isOnline = false;
+          }
+          for (const s of Object.values(room.spectators)) {
+            s.isOnline = false;
+          }
+          this.rooms.set(room.roomCode, room);
+          restored++;
+        } catch (err) {
+          console.error(`[PVP] Corrupt snapshot for room ${row.room_code}, discarding:`, err);
+          db.deleteMatchSnapshot(row.room_code);
+        }
+      }
+    } catch (err) {
+      console.error('[PVP] Failed to load match snapshots:', err);
+    }
+    if (restored > 0) {
+      console.log(`[PVP] Restored ${restored} in-flight long match(es) from snapshots`);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Deadlines swept once per second
+  // -------------------------------------------------------------------------
+
+  private sweep() {
+    const now = Date.now();
+    for (const room of this.rooms.values()) {
+      if (room.status === 'IN_PROGRESS' || room.status === 'OVERTIME') {
+        for (const player of this.allPlayers(room)) {
+          if (player.phase !== 'playing') continue;
+          if (!player.roundDeadlineAt || now < player.roundDeadlineAt) continue;
+          console.log(
+            `[PVP] Round ${player.currentRoundIndex + 1} deadline hit for ${player.nickname} in ${room.roomCode}`
+          );
+          this.completeRoundForPlayer(room, player, true);
+        }
+
+        // Watchdog for a grading call that never settled.
+        for (const round of room.rounds) {
+          for (const batch of Object.values(round.batches)) {
+            if (batch.status === 'grading' && batch.startedAt && now - batch.startedAt > GRADING_STUCK_MS) {
+              console.error(
+                `[PVP] Batch R${round.roundIndex + 1}Q${batch.segmentIndex + 1} in ${room.roomCode} stuck for ` +
+                  `${Math.round((now - batch.startedAt) / 1000)}s — forcing it closed`
+              );
+              batch.status = 'failed';
+              for (const pid of Object.keys(round.players)) {
+                const sub = round.players[pid].submissions[batch.segmentIndex];
+                if (sub && (sub.gradingStatus === 'grading' || sub.gradingStatus === 'idle')) {
+                  sub.gradingStatus = 'graded';
+                  sub.gradingResult = {
+                    score: 0,
+                    points_breakdown: [],
+                    distortion_deduction: 0,
+                    fluency_deduction: 0,
+                    critique: '本题评分超时，按 0 分计。',
+                    reference_translation: '',
+                    gradedAt: Date.now(),
+                  };
+                }
+              }
+              this.checkRoundSettle(room, round.roundIndex);
+              this.checkMatchComplete(room);
+            }
+          }
+        }
+      }
+
+      if (room.status === 'OVERTIME_VOTE' && room.overtime && now >= room.overtime.deadlineAt) {
+        this.resolveOvertimeAsDraw(room, '投票超时');
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Broadcast & per-recipient payloads
+  // -------------------------------------------------------------------------
+
+  private spectatorRoundFor(room: PvpRoomState): number {
+    let max = 0;
+    for (const p of this.allPlayers(room)) {
+      max = Math.max(max, p.currentRoundIndex);
+    }
+    return Math.min(max, Math.max(0, room.rounds.length - 1));
+  }
+
+  private summaryFor(room: PvpRoomState): PvpRoomSummary {
+    const players: PvpRoomSummaryPlayer[] = this.allPlayers(room).map((p) => ({
+      playerId: p.playerId,
+      nickname: p.nickname,
+      isHost: p.isHost,
+      isReady: p.isReady,
+      isOnline: p.isOnline,
+      phase: p.phase,
+      currentRoundIndex: p.currentRoundIndex,
+      currentSegmentIndex: p.currentSegmentIndex,
+      roundDeadlineAt: p.phase === 'playing' ? p.roundDeadlineAt : undefined,
+      answeredCount: p.answeredSegments.length,
+      matchPoints: p.matchPoints,
+      totalScore: p.totalScore,
+      roundsCompleted: p.roundsCompleted,
+      hasFinishedAllRounds: p.hasFinishedAllRounds,
+      finishedAt: p.finishedAt,
+    }));
+
+    const rounds: PvpRoomSummaryRound[] = room.rounds.map((r) => {
+      const started = r.startedAt > 0;
+      const batchValues = Object.values(r.batches);
+      return {
+        roundIndex: r.roundIndex,
+        year: started ? r.year : null,
+        isOvertime: r.isOvertime,
+        settled: r.settled,
+        startedAt: r.startedAt,
+        gradedSegments: batchValues.filter((b) => b.status === 'graded' || b.status === 'failed').length,
+        totalSegments: SEGMENTS_PER_ROUND,
+      };
     });
 
-    this.broadcastRoomState(roomCode);
+    let currentRoundIndex = 0;
+    for (const p of this.allPlayers(room)) currentRoundIndex = Math.max(currentRoundIndex, p.currentRoundIndex);
+
+    return {
+      roomCode: room.roomCode,
+      status: room.status,
+      config: room.config,
+      currentRoundIndex,
+      createdAt: room.createdAt,
+      startedAt: room.startedAt,
+      countdownEndTime: room.countdownEndTime,
+      players,
+      spectators: Object.values(room.spectators).map((s) => ({
+        playerId: s.playerId,
+        nickname: s.nickname,
+        isOnline: s.isOnline,
+      })),
+      rounds,
+      overtime: room.overtime
+        ? {
+            participants: room.overtime.participants,
+            deadlineAt: room.overtime.deadlineAt,
+            votes: room.overtime.votes,
+            status: room.status === 'OVERTIME_VOTE' ? 'voting' : room.status === 'OVERTIME' ? 'running' : 'resolved',
+          }
+        : undefined,
+      winnerId: room.winnerId,
+      rankings: room.rankings,
+    };
   }
+
+  private roundDetailFor(room: PvpRoomState, roundIndex: number, viewerId: string, isSpectator: boolean): RoundDetail | undefined {
+    const round = room.rounds[roundIndex];
+    if (!round) return undefined;
+
+    const viewer = room.players[viewerId];
+    // A player must not read anyone else's answers until their own series is over.
+    const withholdOthers = !isSpectator && !!viewer && viewer.phase === 'playing' && !viewer.hasFinishedAllRounds;
+
+    const withheldPlayerIds: string[] = [];
+    const players: RoundDetailPlayer[] = Object.keys(round.players).map((pid) => {
+      const rp = round.players[pid];
+      const p = room.players[pid];
+      const isSelf = pid === viewerId;
+
+      let submissions = rp.submissions;
+      if (withholdOthers && !isSelf) {
+        withheldPlayerIds.push(pid);
+        submissions = Object.fromEntries(
+          Object.entries(rp.submissions).map(([key, sub]) => [
+            key,
+            {
+              ...sub,
+              studentAnswer: '',
+              gradingResult: sub.gradingResult
+                ? { ...sub.gradingResult, critique: '', reference_translation: '', points_breakdown: [] }
+                : undefined,
+              comparativeAnalysis: undefined,
+            },
+          ])
+        );
+      }
+
+      return {
+        playerId: pid,
+        nickname: p?.nickname ?? pid,
+        isHost: p?.isHost ?? false,
+        isOnline: p?.isOnline,
+        phase: p?.phase ?? 'left',
+        submissions,
+        roundCompletedAt: rp.roundCompletedAt,
+        elapsedSeconds: rp.elapsedSeconds,
+        remainingSeconds: rp.remainingSeconds,
+        timedOut: rp.timedOut,
+        smallScore: rp.smallScore,
+        matchPoints: p?.matchPoints ?? 0,
+        totalScore: p?.totalScore ?? 0,
+        currentSegmentIndex: p?.currentRoundIndex === roundIndex ? p.currentSegmentIndex : -1,
+      };
+    });
+
+    return {
+      roundIndex,
+      year: round.year,
+      isOvertime: round.isOvertime,
+      exam: round.exam,
+      startedAt: round.startedAt,
+      settled: round.settled,
+      scoreEntries: round.scoreEntries,
+      players,
+      withheldPlayerIds,
+    };
+  }
+
+  private pushRoundDetail(playerId: string, roundIndex: number) {
+    const client = this.clients.get(playerId);
+    if (!client?.roomCode) return;
+    const room = this.rooms.get(client.roomCode);
+    if (!room) return;
+    const detail = this.roundDetailFor(room, roundIndex, playerId, !!client.isSpectator);
+    if (!detail) return;
+    client.watchingRound = roundIndex;
+    this.sendToPlayer(playerId, { type: 'round:detail', payload: detail });
+  }
+
+  /** Pushes an updated detail to everyone currently looking at this round. */
+  private pushWatchedRound(room: PvpRoomState, roundIndex: number) {
+    for (const [playerId, client] of this.clients.entries()) {
+      if (client.roomCode !== room.roomCode) continue;
+      const player = room.players[playerId];
+      const watching = client.watchingRound ?? (player ? player.currentRoundIndex : this.spectatorRoundFor(room));
+      if (watching !== roundIndex) continue;
+      const detail = this.roundDetailFor(room, roundIndex, playerId, !!client.isSpectator);
+      if (detail) this.sendToPlayer(playerId, { type: 'round:detail', payload: detail });
+    }
+  }
+
+  broadcast(roomCode: string, message: any) {
+    const room = this.rooms.get(roomCode);
+    if (!room) return;
+
+    const data = JSON.stringify(message);
+    const recipients = new Set([...Object.keys(room.players), ...Object.keys(room.spectators)]);
+
+    for (const pid of recipients) {
+      const ws = this.playerSockets.get(pid);
+      if (ws && ws.readyState === 1 /* OPEN */) {
+        ws.send(data);
+      }
+    }
+  }
+
+  private broadcastSummary(roomCode: string) {
+    const room = this.rooms.get(roomCode);
+    if (!room) return;
+    this.broadcast(roomCode, { type: 'room:summary', payload: this.summaryFor(room) });
+  }
+
+  private sendSummaryTo(playerId: string) {
+    const client = this.clients.get(playerId);
+    if (!client?.roomCode) return;
+    const room = this.rooms.get(client.roomCode);
+    if (!room) return;
+    this.sendToPlayer(playerId, { type: 'room:summary', payload: this.summaryFor(room) });
+  }
+
+  private sendToPlayer(playerId: string, message: any) {
+    const ws = this.playerSockets.get(playerId);
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify(message));
+    }
+  }
+
+  private sendError(playerId: string, errorMessage: string, code?: string) {
+    this.sendToPlayer(playerId, {
+      type: 'error',
+      payload: code ? { message: errorMessage, code } : { message: errorMessage },
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Reconnect / leave / disconnect
+  // -------------------------------------------------------------------------
 
   private reconnectRoom(playerId: string, payload: { roomCode?: string }) {
     let room: PvpRoomState | undefined;
@@ -1122,29 +1959,58 @@ class PvpManager {
           const player = room.players[playerId];
           player.isOnline = true;
           player.lastActiveAt = Date.now();
+          if (client) client.watchingRound = player.currentRoundIndex;
           console.log(
-            `[PVP] Manual reconnect successful for player ${playerId} into room ${room.roomCode} ` +
-              `(status=${room.status}, segment=${player.currentSegmentIndex + 1})`
+            `[PVP] Manual reconnect for player ${playerId} into room ${room.roomCode} ` +
+              `(status=${room.status}, round=${player.currentRoundIndex + 1}, segment=${player.currentSegmentIndex + 1})`
           );
         } else {
-          const spec = room.spectators[playerId];
-          spec.isOnline = true;
-          console.log(
-            `[PVP] Manual reconnect successful for spectator ${playerId} into room ${room.roomCode}`
-          );
+          room.spectators[playerId].isOnline = true;
+          console.log(`[PVP] Manual reconnect for spectator ${playerId} into room ${room.roomCode}`);
         }
 
-        this.sendToPlayer(playerId, {
-          type: 'room:state',
-          payload: room,
-        });
-        this.broadcastRoomState(room.roomCode);
+        this.sendSummaryTo(playerId);
+        if (isPlayer) {
+          const player = room.players[playerId];
+          if (room.rounds[player.currentRoundIndex]) {
+            this.pushRoundDetail(playerId, player.currentRoundIndex);
+          }
+        } else {
+          this.pushRoundDetail(playerId, this.spectatorRoundFor(room));
+        }
+        this.broadcastSummary(room.roomCode);
         return;
       }
     }
 
     console.warn(`[PVP] Reconnect failed for user ${playerId}, room not found`);
     this.sendError(playerId, '对战已结束或房间已失效', 'ROOM_NOT_FOUND');
+  }
+
+  /** Fills every not-yet-played round of a departing player with timeout zeros. */
+  private abandonRemainingRounds(room: PvpRoomState, player: PlayerState) {
+    for (const round of room.rounds) {
+      const rp = round.players[player.playerId];
+      if (!rp) continue;
+      if (!rp.roundCompletedAt) {
+        for (let i = 0; i < SEGMENTS_PER_ROUND; i++) {
+          if (!rp.submissions[i]) rp.submissions[i] = this.createTimeoutSubmission(round.exam, i);
+        }
+        rp.timedOut = true;
+        rp.elapsedSeconds = this.durationSeconds(room);
+        rp.remainingSeconds = 0;
+        rp.roundCompletedAt = Date.now();
+        this.recomputeSmallScore(rp);
+      }
+      for (let i = 0; i < SEGMENTS_PER_ROUND; i++) {
+        this.maybeTriggerBatch(room, round.roundIndex, i);
+      }
+    }
+    player.phase = 'left';
+    player.hasFinishedAllRounds = true;
+    player.roundDeadlineAt = undefined;
+    player.roundsCompleted = room.config.totalRounds;
+    this.refreshTotals(room, player);
   }
 
   private leaveRoom(playerId: string) {
@@ -1155,56 +2021,61 @@ class PvpManager {
     if (!room) return;
 
     if (room.spectators[playerId]) {
-      console.log(`[PVP] Spectator ${playerId} explicitly left room ${roomCode}`);
+      console.log(`[PVP] Spectator ${playerId} left room ${roomCode}`);
       delete room.spectators[playerId];
       client.roomCode = undefined;
       client.isSpectator = false;
-      this.broadcastRoomState(room.roomCode);
+      this.broadcastSummary(room.roomCode);
       return;
     }
 
     if (room.players[playerId]) {
-      console.log(`[PVP] Player ${playerId} explicitly left room ${roomCode}`);
-      delete room.players[playerId];
+      const player = room.players[playerId];
+      const inFlight =
+        room.status === 'IN_PROGRESS' || room.status === 'OVERTIME' || room.status === 'OVERTIME_VOTE';
+
+      console.log(`[PVP] Player ${playerId} left room ${roomCode} (inFlight=${inFlight})`);
       client.roomCode = undefined;
       client.isSpectator = false;
 
-      const remainingPlayers = Object.values(room.players);
-      if (remainingPlayers.length === 0) {
+      if (!inFlight) {
+        delete room.players[playerId];
+      } else {
+        // The leaver stays in the roster: their auto-filled zeros are part of every
+        // remaining round's baseline, and they still receive an archived loss.
+        this.abandonRemainingRounds(room, player);
+        player.isOnline = false;
+        this.broadcastSummary(room.roomCode);
+        for (const round of room.rounds) this.checkRoundSettle(room, round.roundIndex);
+        this.checkMatchComplete(room);
+      }
+
+      const remaining = this.allPlayers(room);
+      if (remaining.length === 0) {
         console.log(`[PVP] Room ${roomCode} has 0 players left, deleting.`);
         this.rooms.delete(room.roomCode);
-        const timer = this.matchTimers.get(room.roomCode);
-        if (timer) {
-          clearTimeout(timer);
-          this.matchTimers.delete(room.roomCode);
-        }
-        const guardrail = this.guardrailTimers.get(room.roomCode);
-        if (guardrail) {
-          clearTimeout(guardrail);
-          this.guardrailTimers.delete(room.roomCode);
-        }
-      } else {
-        if (!remainingPlayers.some((p) => p.isHost)) {
-          remainingPlayers[0].isHost = true;
-        }
-        if (room.status === 'IN_PROGRESS') {
-          this.checkAllFinished(room);
-        }
-        this.broadcastRoomState(room.roomCode);
+        this.clearVoteTimer(room.roomCode);
+        this.deleteSnapshot(room.roomCode);
+      } else if (!remaining.some((p) => p.isHost)) {
+        remaining[0].isHost = true;
       }
+      this.broadcastSummary(room.roomCode);
     }
   }
 
   private handleDisconnect(playerId: string, ws?: WebSocket) {
     const currentSocket = this.playerSockets.get(playerId);
     if (ws && currentSocket && currentSocket !== ws) {
-      console.log(`[PVP] Ignoring close event from stale socket for player ${playerId} (live socket still registered)`);
+      console.log(
+        `[PVP] Ignoring close event from stale socket for player ${playerId} (live socket still registered)`
+      );
       return;
     }
 
     const room = this.findRoomByPlayerId(playerId);
     if (room) {
       if (room.players[playerId]) {
+        // The clock keeps running while offline; the sweep will time the round out.
         room.players[playerId].isOnline = false;
         room.players[playerId].lastActiveAt = Date.now();
         console.log(
@@ -1216,90 +2087,31 @@ class PvpManager {
           `[PVP] Socket disconnected for spectator ${room.spectators[playerId].nickname} (${playerId}) in room ${room.roomCode}.`
         );
       }
-      this.broadcastRoomState(room.roomCode);
+      this.broadcastSummary(room.roomCode);
     }
 
     this.playerSockets.delete(playerId);
   }
 
-  private broadcast(roomCode: string, message: any) {
-    const room = this.rooms.get(roomCode);
-    if (!room) return;
-
-    const data = JSON.stringify(message);
-    const recipients = new Set([
-      ...Object.keys(room.players),
-      ...Object.keys(room.spectators),
-    ]);
-
-    for (const pid of recipients) {
-      const ws = this.playerSockets.get(pid);
-      if (ws && ws.readyState === 1 /* OPEN */) {
-        ws.send(data);
-      }
-    }
-  }
-
-  private broadcastRoomState(roomCode: string) {
-    const room = this.rooms.get(roomCode);
-    if (!room) return;
-    this.broadcast(roomCode, {
-      type: 'room:state',
-      payload: room,
-    });
-  }
-
-  private sendToPlayer(playerId: string, message: any) {
-    const ws = this.playerSockets.get(playerId);
-    if (ws && ws.readyState === 1) {
-      ws.send(JSON.stringify(message));
-    }
-  }
-
-  private sendError(playerId: string, errorMessage: string, code?: string) {
-    this.sendToPlayer(playerId, {
-      type: 'error',
-      payload: code ? { message: errorMessage, code } : { message: errorMessage },
-    });
-  }
-
   private cleanupStaleRooms() {
     const now = Date.now();
     for (const [code, room] of this.rooms.entries()) {
-      // 1. Finished rooms older than 2 hours
       if (room.status === 'FINISHED' && room.startedAt && now - room.startedAt > 2 * 3600 * 1000) {
         console.log(`[PVP] Cleaning up finished stale room ${code}`);
-        const timer = this.matchTimers.get(code);
-        if (timer) {
-          clearTimeout(timer);
-          this.matchTimers.delete(code);
-        }
-        const guardrail = this.guardrailTimers.get(code);
-        if (guardrail) {
-          clearTimeout(guardrail);
-          this.guardrailTimers.delete(code);
-        }
         this.rooms.delete(code);
+        this.clearVoteTimer(code);
+        this.deleteSnapshot(code);
         continue;
       }
 
-      // 2. Waiting rooms with NO online participants for over 30 minutes
       const hasOnlinePlayers = Object.values(room.players).some((p) => p.isOnline);
       const hasOnlineSpectators = Object.values(room.spectators).some((s) => s.isOnline);
       const isOldWaitingRoom = room.createdAt && now - room.createdAt > 30 * 60 * 1000;
       if (room.status === 'WAITING' && !hasOnlinePlayers && !hasOnlineSpectators && isOldWaitingRoom) {
         console.log(`[PVP] Cleaning up abandoned waiting room ${code} (inactive > 30m)`);
-        const timer = this.matchTimers.get(code);
-        if (timer) {
-          clearTimeout(timer);
-          this.matchTimers.delete(code);
-        }
-        const guardrail = this.guardrailTimers.get(code);
-        if (guardrail) {
-          clearTimeout(guardrail);
-          this.guardrailTimers.delete(code);
-        }
         this.rooms.delete(code);
+        this.clearVoteTimer(code);
+        this.deleteSnapshot(code);
       }
     }
   }

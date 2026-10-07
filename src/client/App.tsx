@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import type { AuthUser, PvpRoomState } from '../shared/types.js';
+import type { AuthUser, PvpRoomSummary } from '../shared/types.js';
 import { SwissHeader } from './components/SwissHeader.js';
 import { PasswordGate } from './components/PasswordGate.js';
 import { HomeView } from './views/HomeView.js';
@@ -35,7 +35,7 @@ export const App: React.FC = () => {
 
   // PVP Active State
   const [pvpState, setPvpState] = useState<{
-    roomState: PvpRoomState;
+    summary: PvpRoomSummary;
     socket: PvpSocket;
   } | null>(null);
   const [initialRoomCode, setInitialRoomCode] = useState<string | undefined>();
@@ -173,8 +173,8 @@ export const App: React.FC = () => {
     setCurrentView('pvp-lobby');
   };
 
-  const handleStartMatch = (roomState: PvpRoomState, socket: PvpSocket) => {
-    setPvpState({ roomState, socket });
+  const handleStartMatch = (summary: PvpRoomSummary, socket: PvpSocket) => {
+    setPvpState({ summary, socket });
     setCurrentView('pvp-match');
   };
 
@@ -242,12 +242,10 @@ export const App: React.FC = () => {
 
         {currentView === 'pvp-match' && pvpState && (
           <PvpMatchView
-            initialRoomState={pvpState.roomState}
+            initialSummary={pvpState.summary}
             socket={pvpState.socket}
             playerId={playerId}
             onExit={handleExitMatch}
-            theme={theme}
-            onToggleTheme={handleToggleTheme}
           />
         )}
 

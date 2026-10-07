@@ -14,7 +14,8 @@ import {
   Play,
   Crown,
 } from 'lucide-react';
-import type { PvpRoomState } from '../../shared/types.js';
+import type { PvpRoomSummary, DrawStrategy } from '../../shared/types.js';
+import { poolSize } from '../../shared/scoring.js';
 import { PvpSocket, type PvpConnectionStatus } from '../utils/pvpSocket.js';
 import { clearActivePvpRoom, getAuthToken, setActivePvpRoom } from '../utils/storage.js';
 import { copyTextToClipboard } from '../utils/clipboard.js';
@@ -24,11 +25,13 @@ interface PvpLobbyViewProps {
   playerId: string;
   nickname: string;
   onBack: () => void;
-  onStartMatch: (roomState: PvpRoomState, socket: PvpSocket) => void;
+  onStartMatch: (summary: PvpRoomSummary, socket: PvpSocket) => void;
   initialRoomCode?: string;
   initialSpectate?: boolean;
   autoJoin?: boolean;
 }
+
+const LONG_MATCH_MINUTES = 90;
 
 export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
   initialYear,
@@ -42,17 +45,25 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
 }) => {
   const [mode, setMode] = useState<'create' | 'join'>(initialRoomCode ? 'join' : 'create');
   const [roomCodeInput, setRoomCodeInput] = useState(initialRoomCode || '');
-  const [selectedYear, setSelectedYear] = useState<number>(initialYear);
   const [durationMinutes, setDurationMinutes] = useState<number>(15);
   const [maxPlayers, setMaxPlayers] = useState<number>(2);
   const [allowSpectators, setAllowSpectators] = useState<boolean>(true);
   const [years, setYears] = useState<number[]>([]);
+
+  // --- Multi-round configuration ---
+  const [drawStrategy, setDrawStrategy] = useState<DrawStrategy>('random');
+  const [totalRounds, setTotalRounds] = useState<number>(1);
+  const [rangeStart, setRangeStart] = useState<number>(initialYear);
+  const [rangeEnd, setRangeEnd] = useState<number>(initialYear);
+  const [customYears, setCustomYears] = useState<number[]>([]);
+  const [longMatchAcknowledged, setLongMatchAcknowledged] = useState(false);
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [spectatorNotice, setSpectatorNotice] = useState<string | null>(null);
 
-  // Active connected room state
-  const [currentRoom, setCurrentRoom] = useState<PvpRoomState | null>(null);
+  // Active connected room state (lightweight summary only — round detail is fetched separately)
+  const [currentRoom, setCurrentRoom] = useState<PvpRoomSummary | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
   const [copiedSpectateLink, setCopiedSpectateLink] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
@@ -86,8 +97,8 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
 
     const unsubscribeMessage = socket.subscribe((msg) => {
       switch (msg.type) {
-        case 'room:state': {
-          const room = msg.payload as PvpRoomState;
+        case 'room:summary': {
+          const room = msg.payload as PvpRoomSummary;
           setCurrentRoom(room);
           setLoading(false);
           setError(null);
@@ -167,9 +178,52 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
     }
   };
 
+  // How many papers the currently selected strategy can actually supply.
+  const availablePool = poolSize(
+    years,
+    drawStrategy,
+    { start: rangeStart, end: rangeEnd },
+    customYears
+  );
+  const effectivePool = years.length === 0 ? 0 : availablePool;
+  const requestedRounds = drawStrategy === 'custom' ? customYears.length || 1 : totalRounds;
+  const roundsInUse = Math.max(1, Math.min(requestedRounds, Math.max(1, effectivePool)));
+  const totalMinutes = roundsInUse * durationMinutes;
+  const isLongMatch = totalMinutes > LONG_MATCH_MINUTES;
+
+  // Keep the round count legal whenever the strategy or the pool changes.
+  useEffect(() => {
+    if (effectivePool <= 0) return;
+    setTotalRounds((prev) => Math.min(Math.max(1, prev), effectivePool));
+  }, [effectivePool]);
+
+  useEffect(() => {
+    setLongMatchAcknowledged(false);
+  }, [drawStrategy, totalRounds, durationMinutes, rangeStart, rangeEnd, customYears.length]);
+
   const handleCreateRoom = () => {
     setError(null);
     setSpectatorNotice(null);
+
+    if (effectivePool <= 0) {
+      setError('当前抽取策略下没有可用真题，请调整年份设置');
+      return;
+    }
+    if (roundsInUse > effectivePool) {
+      setError(`当前抽取策略可选真题共 ${effectivePool} 套，轮数不能超过 ${effectivePool}`);
+      return;
+    }
+    if (drawStrategy === 'custom' && customYears.length === 0) {
+      setError('请至少手动选择一套真题');
+      return;
+    }
+    if (isLongMatch && !longMatchAcknowledged) {
+      setError(
+        `本场总时长约 ${totalMinutes} 分钟（超过 ${LONG_MATCH_MINUTES} 分钟），请先勾选下方确认项`
+      );
+      return;
+    }
+
     setLoading(true);
     const socket = getSocket();
     socket.connect();
@@ -177,10 +231,14 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
       type: 'room:create',
       payload: {
         nickname,
-        year: selectedYear,
         durationMinutes,
         maxPlayers,
         allowSpectators,
+        totalRounds: roundsInUse,
+        drawStrategy,
+        rangeStart: drawStrategy === 'range' ? rangeStart : undefined,
+        rangeEnd: drawStrategy === 'range' ? rangeEnd : undefined,
+        customYears: drawStrategy === 'custom' ? customYears.slice(0, roundsInUse) : undefined,
       },
     });
   };
@@ -243,7 +301,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
       try {
         await navigator.share({
           title: '考研英语翻译竞技场对战邀请',
-          text: `我在考研英语（一）翻译竞技场创建了 ${currentRoom.year} 年真题 ${currentRoom.maxPlayers} 人房间，房间码：${currentRoom.roomCode}，来决一胜负吧！`,
+          text: `我在考研英语（一）翻译竞技场创建了 ${currentRoom.config.totalRounds} 轮系列赛 · ${currentRoom.players.length} 人房间，房间码：${currentRoom.roomCode}，来决一胜负吧！`,
           url,
         });
         return;
@@ -293,12 +351,12 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
 
   // --- WAITING ROOM SCREEN ---
   if (currentRoom) {
-    const players = Object.values(currentRoom.players);
-    const spectators = Object.values(currentRoom.spectators || {});
-    const myPlayer = currentRoom.players[playerId];
-    const mySpectator = currentRoom.spectators?.[playerId];
+    const players = currentRoom.players;
+    const spectators = currentRoom.spectators || [];
+    const myPlayer = currentRoom.players.find((p) => p.playerId === playerId);
+    const mySpectator = (currentRoom.spectators || []).find((s) => s.playerId === playerId);
     const isMeSpectator = !!mySpectator && !myPlayer;
-    const roomMaxPlayers = currentRoom.maxPlayers || 2;
+    const roomMaxPlayers = currentRoom.config.maxPlayers || 2;
     const inviteUrl = `${window.location.origin}/#/pvp/${currentRoom.roomCode}`;
 
     // Build ordered slots: put myPlayer first if I am a player, then other players, then null placeholders up to roomMaxPlayers
@@ -415,7 +473,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
                 )}
               </button>
 
-              {currentRoom.allowSpectators !== false && (
+              {currentRoom.config.allowSpectators !== false && (
                 <button
                   onClick={handleCopySpectateLink}
                   className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2.5 border-2 border-blue-600 dark:border-blue-500 bg-blue-50 dark:bg-blue-950/50 hover:bg-blue-600 hover:text-white text-blue-700 dark:text-blue-300 font-mono text-xs font-bold uppercase tracking-wider transition-colors active:scale-[0.98]"
@@ -464,7 +522,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
                 <Calendar className="w-3.5 h-3.5" /> 考研年份
               </div>
               <div className="font-black text-sm text-swiss-black dark:text-zinc-100">
-                {currentRoom.year} 年真题
+                {currentRoom.config.totalRounds} 轮系列赛
               </div>
             </div>
             <div className="p-3 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700">
@@ -472,7 +530,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
                 <Clock className="w-3.5 h-3.5" /> 限时规则
               </div>
               <div className="font-black text-sm text-swiss-black dark:text-zinc-100">
-                {currentRoom.durationMinutes} 分钟限时
+                {currentRoom.config.durationMinutes} 分钟 / 轮
               </div>
             </div>
             <div className="p-3 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700">
@@ -509,7 +567,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
                 <Eye className="w-3.5 h-3.5" /> 实时观战席
               </div>
               <div className="font-black text-sm text-swiss-black dark:text-zinc-100">
-                {currentRoom.allowSpectators === false
+                {currentRoom.config.allowSpectators === false
                   ? '已关闭观战'
                   : `${spectators.length} 人正在观战`}
               </div>
@@ -541,7 +599,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
                 参赛选手席位 ({players.length} / {roomMaxPlayers})
               </span>
               {myPlayer &&
-                currentRoom.allowSpectators !== false &&
+                currentRoom.config.allowSpectators !== false &&
                 (!myPlayer.isHost || players.length > 1) && (
                   <button
                     onClick={() => handleSwitchRole('spectator')}
@@ -653,7 +711,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
           </div>
 
           {/* Spectator Lounge Section */}
-          {currentRoom.allowSpectators !== false && (
+          {currentRoom.config.allowSpectators !== false && (
             <div className="mt-6 pt-5 border-t-2 border-zinc-200 dark:border-zinc-800">
               <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                 <div className="flex items-center gap-2">
@@ -777,22 +835,181 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
         {mode === 'create' ? (
           /* Create Room Form */
           <div className="space-y-4 sm:space-y-5">
+            {/* Round Count + Draw Strategy */}
             <div>
               <label className="block text-xs font-mono font-bold uppercase mb-1.5 text-zinc-700 dark:text-zinc-300">
-                选择对战真题年份
+                对战轮数 (ROUNDS)
               </label>
-              <select
-                value={selectedYear}
-                onChange={(e) => setSelectedYear(parseInt(e.target.value, 10))}
-                className="w-full border-2 border-swiss-black dark:border-zinc-700 px-3.5 py-2.5 font-mono text-sm bg-white dark:bg-zinc-800 text-swiss-black dark:text-zinc-100 focus:outline-none"
-              >
-                {years.map((y) => (
-                  <option key={y} value={y}>
-                    {y} 年考研英语一翻译真题
-                  </option>
-                ))}
-              </select>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setTotalRounds((n) => Math.max(1, n - 1))}
+                  disabled={drawStrategy === 'custom'}
+                  className="w-10 h-10 border-2 border-swiss-black dark:border-zinc-700 font-mono font-black text-lg bg-white dark:bg-zinc-800 disabled:opacity-40"
+                >
+                  −
+                </button>
+                <div className="flex-1 border-2 border-swiss-black dark:border-zinc-700 px-3 py-2 text-center bg-white dark:bg-zinc-800">
+                  <span className="font-mono text-lg font-black text-swiss-black dark:text-zinc-100">
+                    {roundsInUse}
+                  </span>
+                  <span className="font-mono text-xs text-zinc-500 ml-1">轮</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setTotalRounds((n) => Math.min(effectivePool || 1, n + 1))}
+                  disabled={drawStrategy === 'custom' || totalRounds >= effectivePool}
+                  className="w-10 h-10 border-2 border-swiss-black dark:border-zinc-700 font-mono font-black text-lg bg-white dark:bg-zinc-800 disabled:opacity-40"
+                >
+                  +
+                </button>
+                <input
+                  type="range"
+                  min={1}
+                  max={Math.max(1, effectivePool)}
+                  value={roundsInUse}
+                  onChange={(e) => setTotalRounds(parseInt(e.target.value, 10))}
+                  disabled={drawStrategy === 'custom'}
+                  className="w-28 accent-swiss-red disabled:opacity-40"
+                />
+              </div>
+              <p className="mt-1 text-[11px] font-mono text-zinc-500 dark:text-zinc-400">
+                当前策略可选真题 {effectivePool} 套，最多 {Math.max(1, effectivePool)} 轮
+                {drawStrategy === 'custom' && '（手动指定模式下轮数 = 已选考卷数）'}
+              </p>
             </div>
+
+            <div>
+              <label className="block text-xs font-mono font-bold uppercase mb-1.5 text-zinc-700 dark:text-zinc-300">
+                真题抽取策略 (DRAW)
+              </label>
+              <div className="grid grid-cols-3 gap-2 font-mono text-xs font-bold">
+                {(
+                  [
+                    { key: 'random', label: '全随机', desc: '2002–2026' },
+                    { key: 'range', label: '年份区间', desc: '指定起止年' },
+                    { key: 'custom', label: '手动指定', desc: '自选并排序' },
+                  ] as Array<{ key: DrawStrategy; label: string; desc: string }>
+                ).map((item) => (
+                  <button
+                    key={item.key}
+                    type="button"
+                    onClick={() => setDrawStrategy(item.key)}
+                    className={`py-2.5 px-2 border-2 transition-all active:scale-[0.98] ${
+                      drawStrategy === item.key
+                        ? 'border-swiss-red bg-rose-50 dark:bg-rose-950/40 text-swiss-red dark:text-rose-400'
+                        : 'border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 hover:border-swiss-black dark:hover:border-zinc-500'
+                    }`}
+                  >
+                    <div className="text-sm font-black">{item.label}</div>
+                    <span className="block text-[10px] text-zinc-400 dark:text-zinc-500 mt-0.5 font-normal">
+                      {item.desc}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {drawStrategy === 'range' && (
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-mono font-bold uppercase mb-1.5 text-zinc-700 dark:text-zinc-300">
+                    起始年份
+                  </label>
+                  <select
+                    value={rangeStart}
+                    onChange={(e) => setRangeStart(parseInt(e.target.value, 10))}
+                    className="w-full border-2 border-swiss-black dark:border-zinc-700 px-3 py-2 font-mono text-sm bg-white dark:bg-zinc-800 text-swiss-black dark:text-zinc-100"
+                  >
+                    {[...years].sort((a, b) => a - b).map((y) => (
+                      <option key={y} value={y}>
+                        {y}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-mono font-bold uppercase mb-1.5 text-zinc-700 dark:text-zinc-300">
+                    结束年份
+                  </label>
+                  <select
+                    value={rangeEnd}
+                    onChange={(e) => setRangeEnd(parseInt(e.target.value, 10))}
+                    className="w-full border-2 border-swiss-black dark:border-zinc-700 px-3 py-2 font-mono text-sm bg-white dark:bg-zinc-800 text-swiss-black dark:text-zinc-100"
+                  >
+                    {[...years].sort((a, b) => a - b).map((y) => (
+                      <option key={y} value={y}>
+                        {y}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            )}
+
+            {drawStrategy === 'custom' && (
+              <div>
+                <label className="block text-xs font-mono font-bold uppercase mb-1.5 text-zinc-700 dark:text-zinc-300">
+                  手动指定考卷（点击顺序即为轮次顺序，再点一次取消）
+                </label>
+                <div className="flex flex-wrap gap-1.5 max-h-44 overflow-y-auto p-2 border-2 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-800">
+                  {[...years]
+                    .sort((a, b) => b - a)
+                    .map((y) => {
+                      const order = customYears.indexOf(y);
+                      return (
+                        <button
+                          key={y}
+                          type="button"
+                          onClick={() =>
+                            setCustomYears((prev) =>
+                              prev.includes(y) ? prev.filter((v) => v !== y) : [...prev, y]
+                            )
+                          }
+                          className={`px-2 py-1 border font-mono text-[11px] font-bold transition-colors ${
+                            order >= 0
+                              ? 'bg-swiss-red border-swiss-red text-white'
+                              : 'border-zinc-300 dark:border-zinc-600 text-zinc-600 dark:text-zinc-300 hover:border-swiss-black'
+                          }`}
+                        >
+                          {order >= 0 ? `${order + 1}. ` : ''}
+                          {y}
+                        </button>
+                      );
+                    })}
+                </div>
+                {customYears.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setCustomYears([])}
+                    className="mt-1 text-[11px] font-mono text-zinc-500 underline"
+                  >
+                    清空选择
+                  </button>
+                )}
+              </div>
+            )}
+
+            {isLongMatch && (
+              <label
+                className={`flex items-start gap-2 p-3 border-2 cursor-pointer ${
+                  longMatchAcknowledged
+                    ? 'border-amber-500 bg-amber-50 dark:bg-amber-950/30'
+                    : 'border-red-400 bg-red-50 dark:bg-red-950/30'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={longMatchAcknowledged}
+                  onChange={(e) => setLongMatchAcknowledged(e.target.checked)}
+                  className="mt-0.5 w-4 h-4 accent-swiss-red shrink-0"
+                />
+                <span className="text-[11px] font-mono text-zinc-700 dark:text-zinc-300">
+                  ⚠ 这是一场马拉松：{roundsInUse} 轮 × {durationMinutes} 分钟 ≈ {totalMinutes} 分钟。
+                  比赛期间服务重启等极端情况会由服务端快照兜底，但请确认所有选手都能坚持到底。
+                </span>
+              </label>
+            )}
 
             {/* Max Players Selector: 2 / 3 / 4 */}
             <div>

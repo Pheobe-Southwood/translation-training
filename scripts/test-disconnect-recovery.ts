@@ -2,6 +2,16 @@ import { spawn } from 'child_process';
 import { WebSocket } from 'ws';
 import { generateUserToken } from '../src/server/auth.js';
 
+// --- multi-round protocol helpers -------------------------------------------------
+const findPlayer = (payload: any, id: string) =>
+  (payload?.players || []).find((p: any) => p.playerId === id);
+const findSpectator = (payload: any, id: string) =>
+  (payload?.spectators || []).find((s: any) => s.playerId === id);
+const playerCount = (payload: any) => (payload?.players || []).length;
+const isSummary = (msg: any) => msg?.type === 'room:summary';
+// ---------------------------------------------------------------------------------
+
+
 async function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -52,7 +62,7 @@ async function run() {
       });
       hostWs.on('message', (data) => {
         const msg = JSON.parse(data.toString());
-        if (msg.type === 'room:state') {
+        if (msg.type === 'room:summary') {
           roomCode = msg.payload.roomCode;
           console.log(`Room created: ${roomCode}`);
           resolve();
@@ -82,10 +92,10 @@ async function run() {
       guestWs.on('message', (data) => {
         const msg = JSON.parse(data.toString());
         console.log('Guest received msg:', msg.type);
-        if (msg.type === 'room:state') {
+        if (msg.type === 'room:summary') {
           const room = msg.payload;
-          console.log('Room players:', Object.keys(room.players));
-          if (room.players[guestId] && room.players[hostId]) {
+          console.log('Room players:', (room.players || []).map((p: any) => p.playerId));
+          if (findPlayer(room, guestId) && findPlayer(room, hostId)) {
             console.log('Success! Friend joined room even though host was temporarily disconnected!');
             guestJoined = true;
             resolve();
@@ -107,8 +117,8 @@ async function run() {
       });
       hostWs.on('message', (data) => {
         const msg = JSON.parse(data.toString());
-        if (msg.type === 'room:state') {
-          console.log('Host received room:state on reconnect! Status:', msg.payload.status);
+        if (msg.type === 'room:summary') {
+          console.log('Host received room:summary on reconnect! Status:', msg.payload.status);
           hostReconnected = true;
           resolve();
         }
@@ -122,7 +132,7 @@ async function run() {
     await new Promise<void>((resolve, reject) => {
       hostWs.on('message', (data) => {
         const msg = JSON.parse(data.toString());
-        if (msg.type === 'room:state' && msg.payload.status === 'IN_PROGRESS') {
+        if (msg.type === 'room:summary' && msg.payload.status === 'IN_PROGRESS') {
           console.log('Match successfully started in IN_PROGRESS!');
           matchStarted = true;
           resolve();
