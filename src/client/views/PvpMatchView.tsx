@@ -18,6 +18,7 @@ import {
   Users,
   Check,
   X,
+  Quote,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import type {
@@ -82,18 +83,38 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
   const submittedIndicesRef = useRef<Set<number>>(new Set());
   const pendingSubmissionRef = useRef<{ segmentIndex: number; answer: string } | null>(null);
   const lastSubmittedRef = useRef<{ index: number; answer: string } | null>(null);
+  /**
+   * Room this view belongs to. Room state frames for any other room are dropped:
+   * an abandoned lobby broadcasting on the same socket used to overwrite the live
+   * match and send players back to question 1.
+   */
+  const boundRoomCodeRef = useRef<string>(initialRoomState.roomCode);
 
   // Sync WebSocket messages
   useEffect(() => {
     const unsubscribeMessage = socket.subscribe((msg) => {
       try {
         if (msg.type === 'room:state') {
-          setRoomState(msg.payload);
+          const room = msg.payload as PvpRoomState;
+          if (!room || room.roomCode !== boundRoomCodeRef.current) {
+            console.warn(
+              `[PVP] Match view ignoring room:state for ${room?.roomCode} (bound to ${boundRoomCodeRef.current})`
+            );
+            return;
+          }
+          setRoomState(room);
         } else if (msg.type === 'segment:paired_graded' || msg.type === 'segment:graded') {
           playSuccessSound();
         } else if (msg.type === 'match:ended') {
-          setRoomState(msg.payload.roomState);
-          handleMatchSettled(msg.payload.roomState);
+          const finalState = msg.payload?.roomState as PvpRoomState | undefined;
+          if (!finalState || finalState.roomCode !== boundRoomCodeRef.current) {
+            console.warn(
+              `[PVP] Match view ignoring match:ended for ${finalState?.roomCode} (bound to ${boundRoomCodeRef.current})`
+            );
+            return;
+          }
+          setRoomState(finalState);
+          handleMatchSettled(finalState);
         } else if (msg.type === 'error') {
           setSubmitNotice(msg.payload?.message || '操作失败，请重试');
         }
@@ -1022,6 +1043,16 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                     {sentence}
                   </div>
 
+                  {/* Reference translation directly under the question, so players can
+                      compare it with every recorded answer while reviewing. */}
+                  <div className="p-3 bg-rose-50/70 dark:bg-rose-950/40 border-2 border-rose-300 dark:border-rose-900/70 font-sans text-sm leading-relaxed text-zinc-900 dark:text-zinc-100">
+                    <div className="font-mono text-[10px] text-swiss-red dark:text-rose-400 uppercase font-bold mb-1 flex items-center gap-1">
+                      <Quote className="w-3 h-3" /> 标准参考译文
+                    </div>
+                    {sampleSubWithRef?.gradingResult?.reference_translation ||
+                      '（本题暂无参考译文：评分服务未返回或该题评分异常）'}
+                  </div>
+
                   {/* Multi-player translations grid */}
                   <div className={`grid ${reviewGridCols} gap-3 sm:gap-4`}>
                     {rankings.map((r) => {
@@ -1138,16 +1169,6 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                         [横向对比裁决]
                       </span>
                       {sampleSubWithComp.comparativeAnalysis}
-                    </div>
-                  )}
-
-                  {/* Reference translation */}
-                  {sampleSubWithRef?.gradingResult?.reference_translation && (
-                    <div className="p-3 bg-rose-50/50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900/60 font-mono text-xs text-zinc-800 dark:text-zinc-200">
-                      <span className="text-swiss-red dark:text-rose-400 font-bold uppercase mr-2">
-                        [标准参考译文]
-                      </span>
-                      {sampleSubWithRef.gradingResult.reference_translation}
                     </div>
                   )}
                 </div>

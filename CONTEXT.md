@@ -18,6 +18,9 @@ This document defines the core domain concepts, entities, and ubiquitous languag
 - **Solo Session (单人练习模式)**: A self-paced training session where a single student works through the 5 translation segments of a chosen exam. Upon submitting each segment, the student immediately advances to the next segment while AI scoring proceeds asynchronously in the background.
 - **PVP Match (双人实时对战模式)**: A synchronized competition between two players on the same exam. Both players race against the clock and against each other to translate the 5 segments accurately.
 - **PVP Room (对战房间)**: An ephemeral arena identified by a unique 6-character room code (e.g. `K9X2P4`) where a Host and an Opponent gather, configure match duration, signal readiness, and compete.
+- **Single Active Room Binding (单房活跃绑定)**: A player belongs to exactly one active room at a time. Entering a new room releases the seat in every abandoned room; a player already inside a running match cannot enter a second one. Room membership is never guessed from identity alone, so a stale room can never speak for a live match.
+- **Spectator (观战者)**: A non-competing observer seated outside the player slots. Spectators never appear in the player list, never signal readiness, and never influence the match clock, grading, or settlement.
+- **Link Spectator (免登录观战者)**: A spectator who arrives through a shareable spectate link and holds no account. Their seat is strictly read-only: they may watch, and may not create rooms, take player seats, signal readiness, or submit translations.
 - **Match Clock (对战计时器)**: A shared countdown timer (default 15 minutes) for the PVP match. The match concludes when both players finish all segments or when the clock reaches zero.
 - **Player Progress (选手进度)**: The real-time status of a player within a match or session, including current segment index (0–4), submission timestamps, individual segment grading statuses, and cumulative score.
 
@@ -39,5 +42,6 @@ This document defines the core domain concepts, entities, and ubiquitous languag
 ### 5. Identity & Access (准入与凭据)
 
 - **Access Pass (站点访问密码)**: A gatekeeper credential required to enter the platform and initiate AI grading sessions, protecting shared API resources.
+- **Spectate Ticket (观战凭证)**: A signed, expiring credential bound to one room code and embedded in a spectate link. It authorises watching a single room without an account, and grants nothing else.
 - **Player Profile (选手标识)**: A lightweight nickname chosen by the user for PVP representation and local session history tracking.
 - **Session Record (练习档案)**: A historical log of completed solo sessions or PVP matches, recording the date, exam year, individual segment translations, scores, and critiques.

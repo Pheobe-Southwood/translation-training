@@ -13,6 +13,7 @@ import {
   UserPlus,
   Play,
   Crown,
+  X,
 } from 'lucide-react';
 import type { PvpRoomState } from '../../shared/types.js';
 import { PvpSocket, type PvpConnectionStatus } from '../utils/pvpSocket.js';
@@ -27,6 +28,9 @@ interface PvpLobbyViewProps {
   onStartMatch: (roomState: PvpRoomState, socket: PvpSocket) => void;
   initialRoomCode?: string;
   initialSpectate?: boolean;
+  /** Signed read-only spectator credential carried by the shareable link. */
+  spectateTicket?: string;
+  isAuthenticated?: boolean;
   autoJoin?: boolean;
 }
 
@@ -38,6 +42,8 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
   onStartMatch,
   initialRoomCode,
   initialSpectate = false,
+  spectateTicket,
+  isAuthenticated = false,
   autoJoin = false,
 }) => {
   const [mode, setMode] = useState<'create' | 'join'>(initialRoomCode ? 'join' : 'create');
@@ -61,12 +67,28 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
   const [connectionMessage, setConnectionMessage] = useState<string | undefined>(undefined);
 
   const socketRef = useRef<PvpSocket | null>(null);
+  /** Credential the current socket was opened with; a changed link replaces it. */
+  const socketTicketRef = useRef<string | undefined>(undefined);
   const handedOffRef = useRef(false);
   const onStartMatchRef = useRef(onStartMatch);
+  /** Room this view is showing. Any room:state for another room is dropped. */
+  const boundRoomCodeRef = useRef<string | undefined>(undefined);
+
+  /** Link spectator: read-only, no account needed, ticket carries the authority. */
+  const isSpectateLinkViewer = initialSpectate && !!spectateTicket;
+  const isMissingSpectateTicket = initialSpectate && !spectateTicket;
 
   const getSocket = (): PvpSocket => {
+    const ticket = isSpectateLinkViewer ? spectateTicket : undefined;
+    if (socketRef.current && socketTicketRef.current !== ticket) {
+      // The shareable link changed (different room/ticket): the old credential is
+      // worthless, so start a fresh read-only session instead of reusing it.
+      socketRef.current.close();
+      socketRef.current = null;
+    }
     if (!socketRef.current) {
-      socketRef.current = new PvpSocket(playerId);
+      socketTicketRef.current = ticket;
+      socketRef.current = new PvpSocket(playerId, { ticket, nickname });
     }
     return socketRef.current;
   };
@@ -76,8 +98,11 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
   }, [onStartMatch]);
 
   useEffect(() => {
+    // A read-only viewer never needs the exam list (and has no credentials for it).
+    if (isSpectateLinkViewer || isMissingSpectateTicket) return;
     fetchYears();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSpectateLinkViewer, isMissingSpectateTicket]);
 
   // Own the resilient websocket. It survives the hand-off to the live match view
   // (handedOffRef), and is closed when the player leaves the lobby for good.
@@ -88,13 +113,26 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
       switch (msg.type) {
         case 'room:state': {
           const room = msg.payload as PvpRoomState;
+          const bound = boundRoomCodeRef.current;
+          if (bound && room.roomCode !== bound) {
+            // Abandoned rooms used to broadcast into live sockets and reset the
+            // view to question 1. Never let a foreign room frame reach the UI.
+            console.warn(`[PVP] Lobby ignoring room:state for ${room.roomCode} (bound to ${bound})`);
+            break;
+          }
+          boundRoomCodeRef.current = room.roomCode;
+          socket.setRoomCode(room.roomCode);
           setCurrentRoom(room);
           setLoading(false);
           setError(null);
           if (room.status === 'IN_PROGRESS' || room.status === 'FINISHED') {
             handedOffRef.current = true;
-            setActivePvpRoom(room.roomCode);
+            if (!isSpectateLinkViewer) setActivePvpRoom(room.roomCode);
             onStartMatchRef.current(room, socket);
+          } else if (!isSpectateLinkViewer) {
+            // Remember the waiting room too, so a page refresh resumes it through an
+            // explicit room:join instead of the old implicit (and hijackable) binding.
+            setActivePvpRoom(room.roomCode);
           }
           break;
         }
@@ -131,7 +169,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playerId]);
+  }, [playerId, spectateTicket]);
 
   useEffect(() => {
     if (!initialRoomCode) return;
@@ -140,8 +178,17 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
     setRoomCodeInput(code);
     if (!autoJoin && !initialSpectate) return;
 
-    console.log(`[PVP] Auto-joining room ${code} (spectate=${initialSpectate})`);
+    if (isMissingSpectateTicket) {
+      // Old or truncated link: fail loudly instead of silently degrading into a
+      // writable spectator seat, which is what used to let viewers disturb matches.
+      setLoading(false);
+      setError('观战链接不完整或已过期，请让房主在房间内重新复制「邀请观战」链接。');
+      return;
+    }
+
+    console.log(`[PVP] Auto-joining room ${code} (spectate=${initialSpectate}, ticket=${!!spectateTicket})`);
     setLoading(true);
+    boundRoomCodeRef.current = code;
     const socket = getSocket();
     socket.setRoomCode(code);
     socket.connect(code);
@@ -150,7 +197,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
       payload: { roomCode: code, nickname, asSpectator: initialSpectate },
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialRoomCode, autoJoin, initialSpectate]);
+  }, [initialRoomCode, autoJoin, initialSpectate, spectateTicket]);
 
   const fetchYears = async () => {
     try {
@@ -171,7 +218,10 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
     setError(null);
     setSpectatorNotice(null);
     setLoading(true);
+    // A brand new room binds itself when its first state frame arrives.
+    boundRoomCodeRef.current = undefined;
     const socket = getSocket();
+    socket.setRoomCode(undefined);
     socket.connect();
     socket.send({
       type: 'room:create',
@@ -191,9 +241,14 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
       setError('请输入6位房间码');
       return;
     }
+    if (!asSpectator && !isAuthenticated) {
+      setError('参赛需要先登录账号；仅观战无需登录，可直接使用房主分享的观战链接。');
+      return;
+    }
     setError(null);
     setSpectatorNotice(null);
     setLoading(true);
+    boundRoomCodeRef.current = code;
     const socket = getSocket();
     socket.setRoomCode(code);
     socket.connect(code);
@@ -260,7 +315,11 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
 
   const handleCopySpectateLink = async () => {
     if (!currentRoom) return;
-    const url = `${window.location.origin}/#/pvp/${currentRoom.roomCode}?spectate=1`;
+    // The ticket lives in the URL fragment (never sent to the server) and is what
+    // lets a friend watch without an account while staying strictly read-only.
+    const ticket = currentRoom.spectateTicket;
+    const query = ticket ? `?spectate=1&t=${encodeURIComponent(ticket)}` : '?spectate=1';
+    const url = `${window.location.origin}/#/pvp/${currentRoom.roomCode}${query}`;
     const success = await copyTextToClipboard(url);
     if (success) {
       setCopiedSpectateLink(true);
@@ -285,11 +344,109 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
       socketRef.current = null;
     }
     clearActivePvpRoom();
+    boundRoomCodeRef.current = undefined;
     setCurrentRoom(null);
     setCountdownNum(null);
     setSpectatorNotice(null);
     setConnectionStatus('idle');
   };
+
+  /** Link spectator leaving for good: release the seat, stop reconnecting, go home. */
+  const handleExitSpectate = () => {
+    const socket = socketRef.current;
+    if (socket) {
+      socket.send({ type: 'room:leave' });
+      socket.close();
+      socketRef.current = null;
+    }
+    boundRoomCodeRef.current = undefined;
+    onBack();
+  };
+
+  // --- LINK-SPECTATOR SCREENS (no account required) ---
+  if (mode === 'join' && isMissingSpectateTicket && initialRoomCode) {
+    return (
+      <div className="max-w-2xl mx-auto px-3 sm:px-4 py-10 space-y-5">
+        <div className="border-2 sm:border-4 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-900 p-6 sm:p-8 shadow-[6px_6px_0px_0px_#09090b] dark:shadow-[6px_6px_0px_0px_#000000] space-y-4 text-center">
+          <div className="w-12 h-12 bg-amber-500 text-white flex items-center justify-center mx-auto">
+            <Eye className="w-6 h-6" />
+          </div>
+          <h2 className="text-xl sm:text-2xl font-black uppercase text-swiss-black dark:text-zinc-100">
+            观战链接无效或已过期
+          </h2>
+          <p className="font-mono text-xs text-zinc-600 dark:text-zinc-400 leading-relaxed">
+            房间 <span className="font-bold text-swiss-red">{initialRoomCode}</span> 的观战链接缺少有效凭证。
+            请让房主在房间内点击「邀请观战」重新复制链接（免登录，点开即可观看）。
+          </p>
+          <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+            {isAuthenticated && (
+              <button
+                onClick={() => handleJoinRoom(true)}
+                className="px-5 py-3 bg-blue-600 hover:bg-blue-700 text-white font-mono text-xs font-bold uppercase transition-colors active:scale-[0.99]"
+              >
+                以登录身份进入观战位
+              </button>
+            )}
+            <button
+              onClick={onBack}
+              className="px-5 py-3 border-2 border-swiss-black dark:border-zinc-700 font-mono text-xs font-bold uppercase transition-colors text-swiss-black dark:text-zinc-200"
+            >
+              返回首页
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (isSpectateLinkViewer && !currentRoom) {
+    const spectateFailed = connectionStatus === 'fatal';
+    return (
+      <div className="max-w-2xl mx-auto px-3 sm:px-4 py-10 space-y-5">
+        <div className="border-2 sm:border-4 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-900 p-6 sm:p-8 shadow-[6px_6px_0px_0px_#09090b] dark:shadow-[0px_0px_0px_0px_#000000] space-y-4 text-center">
+          <div
+            className={`w-12 h-12 flex items-center justify-center mx-auto text-white ${
+              spectateFailed ? 'bg-swiss-red' : 'bg-blue-600'
+            }`}
+          >
+            {spectateFailed ? <X className="w-6 h-6" /> : <Eye className="w-6 h-6" />}
+          </div>
+          <h2 className="text-xl sm:text-2xl font-black uppercase text-swiss-black dark:text-zinc-100">
+            {spectateFailed ? '无法进入观战' : '正在接入实时观战…'}
+          </h2>
+          <div className="font-mono text-xs text-zinc-600 dark:text-zinc-400 leading-relaxed">
+            房间 <span className="font-bold text-swiss-red">{initialRoomCode}</span>
+            {' · '}免登录只读观战，您的观看不会影响任何选手。
+          </div>
+          {!spectateFailed && (
+            <div className="flex items-center justify-center gap-2 font-mono text-xs text-blue-700 dark:text-blue-300">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span>{connectionMessage || '正在同步房间数据...'}</span>
+            </div>
+          )}
+          {spectateFailed && (
+            <p className="font-mono text-xs text-red-600 dark:text-red-400">{connectionMessage || '观战连接失败'}</p>
+          )}
+          <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+            {isAuthenticated && (
+              <button
+                onClick={() => handleJoinRoom(true)}
+                className="px-5 py-3 bg-blue-600 hover:bg-blue-700 text-white font-mono text-xs font-bold uppercase transition-colors active:scale-[0.99]"
+              >
+                以登录身份进入观战位
+              </button>
+            )}
+            <button
+              onClick={onBack}
+              className="px-5 py-3 border-2 border-swiss-black dark:border-zinc-700 font-mono text-xs font-bold uppercase transition-colors text-swiss-black dark:text-zinc-200"
+            >
+              返回首页
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // --- WAITING ROOM SCREEN ---
   if (currentRoom) {
@@ -298,8 +455,15 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
     const myPlayer = currentRoom.players[playerId];
     const mySpectator = currentRoom.spectators?.[playerId];
     const isMeSpectator = !!mySpectator && !myPlayer;
+    /** Link viewers are strictly read-only: no player actions are offered at all. */
+    const readOnlyViewer = isSpectateLinkViewer;
     const roomMaxPlayers = currentRoom.maxPlayers || 2;
     const inviteUrl = `${window.location.origin}/#/pvp/${currentRoom.roomCode}`;
+    const spectateUrl = currentRoom.spectateTicket
+      ? `${window.location.origin}/#/pvp/${currentRoom.roomCode}?spectate=1&t=${encodeURIComponent(
+          currentRoom.spectateTicket
+        )}`
+      : `${window.location.origin}/#/pvp/${currentRoom.roomCode}?spectate=1`;
 
     // Build ordered slots: put myPlayer first if I am a player, then other players, then null placeholders up to roomMaxPlayers
     const orderedPlayers = myPlayer
@@ -347,6 +511,27 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
           <div className="p-3 border-2 border-blue-500 bg-blue-50 dark:bg-blue-950/40 text-blue-900 dark:text-blue-200 font-mono text-xs flex items-center gap-2">
             <Eye className="w-4 h-4 shrink-0 text-blue-600 dark:text-blue-400" />
             <span>{spectatorNotice}</span>
+          </div>
+        )}
+
+        {readOnlyViewer && (
+          <div className="p-3 border-2 border-blue-500 bg-blue-50 dark:bg-blue-950/40 text-blue-900 dark:text-blue-200 font-mono text-xs flex flex-wrap items-center gap-2">
+            <Eye className="w-4 h-4 shrink-0 text-blue-600 dark:text-blue-400" />
+            <span className="font-bold">只读观战模式（免登录）</span>
+            <span className="text-blue-800/80 dark:text-blue-300/80">
+              您的进出与操作不会影响任何选手的准备、答题进度与成绩。
+            </span>
+            {isAuthenticated && (
+              <button
+                onClick={() => {
+                  window.location.hash = `#/pvp/${currentRoom.roomCode}`;
+                  window.location.reload();
+                }}
+                className="ml-auto px-2.5 py-1 border border-blue-600 text-blue-700 dark:text-blue-300 hover:bg-blue-600 hover:text-white font-bold transition-colors"
+              >
+                转为参赛选手
+              </button>
+            )}
           </div>
         )}
 
@@ -398,22 +583,24 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
             </div>
 
             <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
-              <button
-                onClick={handleCopyLink}
-                className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2.5 border-2 border-swiss-black dark:border-zinc-700 bg-swiss-black hover:bg-swiss-red dark:bg-zinc-100 dark:text-swiss-black dark:hover:bg-swiss-red dark:hover:text-white text-white font-mono text-xs font-bold uppercase tracking-wider transition-colors shadow-sm active:scale-[0.98]"
-              >
-                {copiedLink ? (
-                  <>
-                    <Check className="w-3.5 h-3.5 text-emerald-400 dark:text-emerald-600" />
-                    <span>已复制参赛链接</span>
-                  </>
-                ) : (
-                  <>
-                    <Share2 className="w-3.5 h-3.5 text-swiss-red" />
-                    <span>邀请参赛</span>
-                  </>
-                )}
-              </button>
+              {!readOnlyViewer && (
+                <button
+                  onClick={handleCopyLink}
+                  className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2.5 border-2 border-swiss-black dark:border-zinc-700 bg-swiss-black hover:bg-swiss-red dark:bg-zinc-100 dark:text-swiss-black dark:hover:bg-swiss-red dark:hover:text-white text-white font-mono text-xs font-bold uppercase tracking-wider transition-colors shadow-sm active:scale-[0.98]"
+                >
+                  {copiedLink ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-emerald-400 dark:text-emerald-600" />
+                      <span>已复制参赛链接</span>
+                    </>
+                  ) : (
+                    <>
+                      <Share2 className="w-3.5 h-3.5 text-swiss-red" />
+                      <span>邀请参赛</span>
+                    </>
+                  )}
+                </button>
+              )}
 
               {currentRoom.allowSpectators !== false && (
                 <button
@@ -428,33 +615,49 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
                   ) : (
                     <>
                       <Eye className="w-3.5 h-3.5" />
-                      <span>邀请观战</span>
+                      <span>邀请观战（免登录）</span>
                     </>
                   )}
                 </button>
               )}
 
               <button
-                onClick={handleLeaveRoom}
+                onClick={readOnlyViewer ? handleExitSpectate : handleLeaveRoom}
                 className="px-3.5 py-2.5 border-2 border-zinc-300 dark:border-zinc-700 hover:border-swiss-black dark:hover:border-zinc-400 font-mono text-xs font-bold uppercase transition-colors text-zinc-600 dark:text-zinc-300 bg-white dark:bg-zinc-800"
               >
-                退出房间
+                {readOnlyViewer ? '退出观战' : '退出房间'}
               </button>
             </div>
           </div>
 
           {/* Quick link box for manual selection */}
-          <div className="mt-3 p-2.5 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700 flex flex-wrap items-center gap-2">
-            <span className="text-[11px] font-mono font-bold text-zinc-500 dark:text-zinc-400 uppercase shrink-0">
-              直达链接：
-            </span>
-            <input
-              type="text"
-              readOnly
-              value={inviteUrl}
-              onClick={(e) => (e.target as HTMLInputElement).select()}
-              className="flex-1 min-w-[160px] bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 px-2.5 py-1 text-xs font-mono text-zinc-700 dark:text-zinc-200 select-all cursor-text focus:outline-none"
-            />
+          <div className="mt-3 p-2.5 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700 space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[11px] font-mono font-bold text-zinc-500 dark:text-zinc-400 uppercase shrink-0">
+                参赛链接：
+              </span>
+              <input
+                type="text"
+                readOnly
+                value={inviteUrl}
+                onClick={(e) => (e.target as HTMLInputElement).select()}
+                className="flex-1 min-w-[160px] bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 px-2.5 py-1 text-xs font-mono text-zinc-700 dark:text-zinc-200 select-all cursor-text focus:outline-none"
+              />
+            </div>
+            {currentRoom.allowSpectators !== false && (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[11px] font-mono font-bold text-blue-600 dark:text-blue-400 uppercase shrink-0">
+                  观战链接：
+                </span>
+                <input
+                  type="text"
+                  readOnly
+                  value={spectateUrl}
+                  onClick={(e) => (e.target as HTMLInputElement).select()}
+                  className="flex-1 min-w-[160px] bg-white dark:bg-zinc-900 border border-blue-300 dark:border-blue-900 px-2.5 py-1 text-xs font-mono text-zinc-700 dark:text-zinc-200 select-all cursor-text focus:outline-none"
+                />
+              </div>
+            )}
           </div>
 
           {/* Match Settings Info (4-grid) */}
@@ -631,7 +834,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
                         <div className="font-mono text-xs font-bold text-swiss-black dark:text-zinc-200 uppercase">
                           空缺选手席位 #{idx + 1}
                         </div>
-                        {isMeSpectator ? (
+                        {isMeSpectator && !readOnlyViewer ? (
                           <button
                             onClick={() => handleSwitchRole('player')}
                             className="mt-2.5 px-3 py-1.5 bg-swiss-black hover:bg-swiss-red text-white dark:bg-zinc-100 dark:text-swiss-black dark:hover:bg-swiss-red dark:hover:text-white font-mono text-xs font-bold uppercase flex items-center gap-1.5 transition-colors"
@@ -641,7 +844,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
                           </button>
                         ) : (
                           <div className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400 mt-1">
-                            等待好友加入此席位...
+                            {readOnlyViewer ? '只读观战链接不可占用选手席' : '等待好友加入此席位...'}
                           </div>
                         )}
                       </div>
@@ -713,6 +916,36 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
   }
 
   // --- PRE-ROOM (CREATE OR JOIN) SCREEN ---
+  //
+  // Creating/joining a player seat requires an account (the seat must persist and
+  // be scorable). Watching never does: that path comes from the read-only link above.
+  if (!isAuthenticated) {
+    return (
+      <div className="max-w-2xl mx-auto px-3 sm:px-4 py-6 sm:py-10 space-y-5">
+        <button
+          onClick={onBack}
+          className="flex items-center gap-1.5 px-3 py-1.5 border border-zinc-300 dark:border-zinc-700 hover:border-swiss-black dark:hover:border-zinc-400 font-mono text-xs font-bold transition-colors bg-white dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200"
+        >
+          <ArrowLeft className="w-3.5 h-3.5" />
+          返回真题首页
+        </button>
+        <div className="border-2 sm:border-4 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-900 p-6 sm:p-8 shadow-[6px_6px_0px_0px_#09090b] dark:shadow-[6px_6px_0px_0px_#000000] space-y-4 text-center">
+          <div className="w-12 h-12 bg-swiss-red text-white flex items-center justify-center mx-auto">
+            <Swords className="w-6 h-6" />
+          </div>
+          <h2 className="text-xl sm:text-2xl font-black uppercase text-swiss-black dark:text-zinc-100">
+            参赛需要登录账号
+          </h2>
+          <p className="font-mono text-xs text-zinc-600 dark:text-zinc-400 leading-relaxed">
+            创建或加入选手席位需要登录（成绩与档案会绑定账号）。
+            <br />
+            如果只是想观战：无需登录，直接打开房主分享的「邀请观战」链接即可实时观看。
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-2xl mx-auto px-3 sm:px-4 py-6 sm:py-10 space-y-5 sm:space-y-6">
       <button

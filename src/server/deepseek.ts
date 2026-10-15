@@ -1,6 +1,16 @@
 import { CONFIG } from './config.js';
 import type { GradingResult } from '../shared/types.js';
 
+/**
+ * Thinking-mode request parameters shared by every grading entry point.
+ * Effort is controlled in one place (see CONFIG.deepseekReasoningEffort, default
+ * `high`) so the deployed behaviour is auditable.
+ */
+const THINKING_PARAMS = {
+  thinking: { type: 'enabled' },
+  reasoning_effort: CONFIG.deepseekReasoningEffort,
+} as const;
+
 const SYSTEM_PROMPT = `你是一位英语翻译题的阅卷老师
 一、核心评分公式
 单句得分 = 采分点得分（0-2分） - 整句扭曲扣分 - 通顺度扣分。
@@ -167,8 +177,7 @@ export async function gradeTranslation(params: {
       { role: 'system', content: SYSTEM_PROMPT },
       { role: 'user', content: userContent },
     ],
-    thinking: { type: 'enabled' },
-    reasoning_effort: 'high',
+    ...THINKING_PARAMS,
     tools: [GRADE_TRANSLATION_TOOL],
     stream: false,
   };
@@ -269,8 +278,7 @@ export async function gradePvpPairTranslation(params: {
       { role: 'system', content: SYSTEM_PROMPT },
       { role: 'user', content: userContent },
     ],
-    thinking: { type: 'enabled' },
-    reasoning_effort: 'high',
+    ...THINKING_PARAMS,
     tools: [GRADE_PVP_PAIR_TOOL],
     stream: false,
   };

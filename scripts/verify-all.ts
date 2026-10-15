@@ -1,6 +1,7 @@
 import { spawn, ChildProcess } from 'child_process';
 import { WebSocket } from 'ws';
 import dotenv from 'dotenv';
+import { generateUserToken } from '../src/server/auth.js';
 
 dotenv.config();
 
@@ -143,10 +144,14 @@ async function runTests() {
     const hostPlayerId = 'p_host_123';
     const guestPlayerId = 'p_guest_456';
 
-    const wsUrl = `ws://127.0.0.1:8889/ws?token=${token}`;
-
-    const hostWs = new WebSocket(`${wsUrl}&playerId=${hostPlayerId}`);
-    const guestWs = new WebSocket(`${wsUrl}&playerId=${guestPlayerId}`);
+    // Each socket must present a token that belongs to its own playerId: the server
+    // binds them together so one account cannot hijack another's seat.
+    const hostWs = new WebSocket(
+      `ws://127.0.0.1:8889/ws?token=${encodeURIComponent(generateUserToken(hostPlayerId))}&playerId=${hostPlayerId}`
+    );
+    const guestWs = new WebSocket(
+      `ws://127.0.0.1:8889/ws?token=${encodeURIComponent(generateUserToken(guestPlayerId))}&playerId=${guestPlayerId}`
+    );
 
     let roomCode = '';
 

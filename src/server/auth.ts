@@ -57,6 +57,58 @@ export function verifyUserToken(token: string | undefined): { userId: string } |
   }
 }
 
+/**
+ * Read-only spectator credential embedded in the shareable spectate link
+ * (`/#/pvp/<CODE>?spectate=1&t=<ticket>`).
+ *
+ * Why a ticket instead of a user token: watching a match must work without an
+ * account, and a spectator must never be able to touch a player seat. The ticket
+ * is bound to one room code and expires on its own, so following a link grants
+ * exactly "look at this room" and nothing else.
+ */
+export function generateSpectateTicket(roomCode: string, ttlMs = 24 * 60 * 60 * 1000): string {
+  const code = roomCode.toUpperCase().trim();
+  const expiresAt = Date.now() + ttlMs;
+  const hmac = crypto
+    .createHmac('sha256', SECRET_SALT)
+    .update(`spectate:${code}:${expiresAt}`)
+    .digest('hex');
+  return Buffer.from(`${code}:${expiresAt}:${hmac}`).toString('base64url');
+}
+
+export function verifySpectateTicket(ticket: string | undefined): { roomCode: string } | null {
+  if (!ticket) return null;
+  try {
+    const raw = Buffer.from(ticket, 'base64url').toString('utf8');
+    const [roomCode, expiresAtStr, hmac] = raw.split(':');
+    if (!roomCode || !expiresAtStr || !hmac) return null;
+
+    const expiresAt = parseInt(expiresAtStr, 10);
+    if (isNaN(expiresAt) || expiresAt < Date.now()) return null;
+
+    const expectedHmac = crypto
+      .createHmac('sha256', SECRET_SALT)
+      .update(`spectate:${roomCode}:${expiresAt}`)
+      .digest('hex');
+    if (!timingSafeStringEqual(hmac, expectedHmac)) return null;
+
+    return { roomCode };
+  } catch {
+    return null;
+  }
+}
+
+function timingSafeStringEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  try {
+    return crypto.timingSafeEqual(bufA, bufB);
+  } catch {
+    return false;
+  }
+}
+
 // Backwards compatibility helpers
 export function generateToken(userId = 'default'): string {
   return generateUserToken(userId);

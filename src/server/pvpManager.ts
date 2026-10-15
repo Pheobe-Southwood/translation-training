@@ -3,27 +3,59 @@ import type {
   PvpRoomState,
   PlayerState,
   PlayerRanking,
+  SpectatorState,
   TranslationExam,
   SegmentSubmission,
   HistorySessionRecord,
 } from '../shared/types.js';
 import { getExamByYear, getRandomExam } from './examService.js';
 import { gradeTranslation, gradePvpPairTranslation } from './deepseek.js';
+import { generateSpectateTicket } from './auth.js';
 import { db } from './db.js';
 
+/**
+ * A single live websocket.
+ *
+ * Connections are keyed by `connId`, never by `playerId`: the same account may
+ * legitimately have several tabs open (a match tab plus a spectator tab), and one
+ * tab closing must not unregister another tab's socket. `playerId` is only the
+ * *identity* used for seats and scoring.
+ *
+ * Room membership is bound only by an explicit `room:create` / `room:join` /
+ * `room:reconnect`. The previous implementation guessed the room from the
+ * playerId on every socket open, which attached live sockets to abandoned rooms
+ * and pushed the wrong room state into the live match view.
+ */
 interface ConnectedClient {
+  connId: string;
   ws: WebSocket;
   playerId: string;
+  nickname?: string;
   roomCode?: string;
-  isSpectator?: boolean;
+  role: 'player' | 'spectator';
+  /**
+   * Ticket-authenticated viewer following a shareable spectate link. Such a
+   * connection may only ever watch: every player action is rejected, so watching
+   * a match can never affect it.
+   */
+  spectatorOnly: boolean;
 }
+
+/** Idle waiting rooms are swept after this long with no online players. */
+const ABANDONED_WAITING_ROOM_MS = 10 * 60 * 1000;
+/** Offline seats of link spectators are recycled after this long. */
+const OFFLINE_ANONYMOUS_SPECTATOR_MS = 10 * 60 * 1000;
+/** Finished rooms are kept around for post-match review. */
+const FINISHED_ROOM_TTL_MS = 2 * 60 * 60 * 1000;
 
 class PvpManager {
   private rooms: Map<string, PvpRoomState> = new Map();
-  private clients: Map<string, ConnectedClient> = new Map(); // playerId -> ConnectedClient
-  private playerSockets: Map<string, WebSocket> = new Map(); // playerId -> ws
+  private clients: Map<string, ConnectedClient> = new Map(); // connId -> ConnectedClient
+  private playerSockets: Map<string, Set<WebSocket>> = new Map(); // playerId -> live sockets
   private matchTimers: Map<string, NodeJS.Timeout> = new Map(); // roomCode -> Timer
   private guardrailTimers: Map<string, NodeJS.Timeout> = new Map(); // roomCode -> Timer
+  private countdownTimers: Map<string, NodeJS.Timeout> = new Map(); // roomCode -> Timer
+  private connSeq = 0;
 
   constructor() {
     // Periodic cleanup of truly abandoned rooms (runs every 5 minutes)
@@ -32,115 +64,292 @@ class PvpManager {
     }, 5 * 60 * 1000);
   }
 
-  public registerClient(playerId: string, ws: WebSocket) {
-    const previousSocket = this.playerSockets.get(playerId);
-    if (previousSocket && previousSocket !== ws) {
-      console.log(
-        `[PVP] Replacing stale socket for player ${playerId} (previous readyState=${previousSocket.readyState})`
-      );
+  // --- Connection lifecycle -------------------------------------------------
+
+  /**
+   * Register a player-capable (account-authenticated) connection.
+   *
+   * Deliberately performs NO implicit room association: the room is chosen by an
+   * explicit join/create/reconnect message. Returning the connId lets the caller
+   * log/route precisely.
+   */
+  public registerClient(playerId: string, ws: WebSocket): string {
+    const client = this.createConnection(playerId, ws, 'player', false);
+    console.log(
+      `[PVP] Player socket registered for ${playerId} (conn=${client.connId}). Awaiting explicit room join.`
+    );
+    return client.connId;
+  }
+
+  /**
+   * Register a read-only viewer from a shareable spectate link. The ticket already
+   * proved possession of the room code, so the seat is created immediately and the
+   * connection is locked to that room with the spectator role.
+   */
+  public registerSpectatorSeat(
+    playerId: string,
+    roomCode: string,
+    nickname: string | undefined,
+    ws: WebSocket
+  ): { ok: true } | { ok: false; reason: 'ROOM_NOT_FOUND' | 'SPECTATING_DISABLED' } {
+    const code = roomCode.toUpperCase().trim();
+    const room = this.rooms.get(code);
+    if (!room) {
+      console.warn(`[PVP] Spectate ticket rejected, room not found: ${code}`);
+      return { ok: false, reason: 'ROOM_NOT_FOUND' };
+    }
+    if (room.allowSpectators === false) {
+      console.warn(`[PVP] Spectate ticket rejected, spectators disabled in room ${code}`);
+      return { ok: false, reason: 'SPECTATING_DISABLED' };
     }
 
-    // The newest socket always owns outgoing replies. A late close event from a
-    // replaced socket must never unregister the live one (see handleDisconnect).
-    this.clients.set(playerId, { ws, playerId });
-    this.playerSockets.set(playerId, ws);
+    const client = this.createConnection(playerId, ws, 'spectator', true, nickname);
+    client.roomCode = code;
+    const seat = this.ensureSpectatorSeat(room, playerId, nickname, true);
+    seat.isOnline = true;
+    console.log(
+      `[PVP] Link spectator "${seat.nickname}" (${playerId}) is watching room ${code} (read-only, no account)`
+    );
+    this.sendToClient(client, { type: 'room:state', payload: room });
+    this.broadcastRoomState(code);
+    return { ok: true };
+  }
 
-    // Check if user belongs to an existing active room (for auto-reconnect)
-    const existingRoom = this.findRoomByPlayerId(playerId);
-    if (existingRoom && existingRoom.status !== 'FINISHED') {
-      const player = existingRoom.players[playerId];
-      const spectator = existingRoom.spectators[playerId];
+  private createConnection(
+    playerId: string,
+    ws: WebSocket,
+    role: 'player' | 'spectator',
+    spectatorOnly: boolean,
+    nickname?: string
+  ): ConnectedClient {
+    const client: ConnectedClient = {
+      connId: `${playerId}#${++this.connSeq}`,
+      ws,
+      playerId,
+      nickname: nickname ? nickname.trim().slice(0, 16) : undefined,
+      role,
+      spectatorOnly,
+    };
+    this.clients.set(client.connId, client);
 
-      if (player) {
-        player.isOnline = true;
-        player.lastActiveAt = Date.now();
-        const client = this.clients.get(playerId);
-        if (client) {
-          client.roomCode = existingRoom.roomCode;
-          client.isSpectator = false;
-        }
-
-        console.log(
-          `[PVP] Re-associated socket for player "${player.nickname}" (${playerId}) in room ${existingRoom.roomCode} ` +
-            `(status=${existingRoom.status}, segment=${player.currentSegmentIndex + 1})`
-        );
-        this.broadcastRoomState(existingRoom.roomCode);
-      } else if (spectator) {
-        spectator.isOnline = true;
-        const client = this.clients.get(playerId);
-        if (client) {
-          client.roomCode = existingRoom.roomCode;
-          client.isSpectator = true;
-        }
-
-        console.log(
-          `[PVP] Re-associated socket for spectator "${spectator.nickname}" (${playerId}) in room ${existingRoom.roomCode}`
-        );
-        this.broadcastRoomState(existingRoom.roomCode);
-      }
+    let sockets = this.playerSockets.get(playerId);
+    if (!sockets) {
+      sockets = new Set();
+      this.playerSockets.set(playerId, sockets);
     }
+    sockets.add(ws);
 
     ws.on('close', () => {
-      this.handleDisconnect(playerId, ws);
+      this.handleDisconnect(client.connId);
     });
 
     ws.on('message', (raw: any) => {
       try {
         const msg = JSON.parse(raw.toString());
-        this.handleMessage(playerId, msg);
+        this.handleMessage(client.connId, msg);
       } catch (err) {
-        this.sendError(playerId, 'Invalid JSON message payload');
+        this.sendError(client, 'Invalid JSON message payload');
       }
     });
+
+    return client;
   }
 
-  private findRoomByPlayerId(playerId: string): PvpRoomState | undefined {
-    for (const room of this.rooms.values()) {
-      if (room.players[playerId] || room.spectators[playerId]) {
-        return room;
-      }
-    }
-    return undefined;
-  }
+  private handleMessage(connId: string, message: { type: string; payload?: any }) {
+    const client = this.clients.get(connId);
+    if (!client) return;
 
-  private handleMessage(playerId: string, message: { type: string; payload?: any }) {
     const { type, payload = {} } = message;
 
     switch (type) {
       case 'ping':
-        this.sendToPlayer(playerId, { type: 'pong' });
+        this.sendToClient(client, { type: 'pong' });
         break;
       case 'room:create':
-        this.createRoom(playerId, payload);
+        this.createRoom(client, payload);
         break;
       case 'room:join':
-        this.joinRoom(playerId, payload);
+        this.joinRoom(client, payload);
         break;
       case 'room:update_settings':
-        this.updateRoomSettings(playerId, payload);
+        this.updateRoomSettings(client, payload);
         break;
       case 'room:toggle_ready':
-        this.toggleReady(playerId);
+        this.toggleReady(client);
         break;
       case 'room:switch_role':
-        this.switchRole(playerId, payload);
+        this.switchRole(client, payload);
         break;
       case 'room:start_early':
-        this.startEarly(playerId);
+        this.startEarly(client);
         break;
       case 'segment:submit':
-        this.submitSegment(playerId, payload);
+        this.submitSegment(client, payload);
         break;
       case 'room:leave':
-        this.leaveRoom(playerId);
+        this.leaveRoom(client);
         break;
       case 'room:reconnect':
-        this.reconnectRoom(playerId, payload);
+        this.reconnectRoom(client, payload);
         break;
       default:
-        this.sendError(playerId, `Unknown message type: ${type}`);
+        this.sendError(client, `Unknown message type: ${type}`);
     }
   }
+
+  // --- Room resolution ------------------------------------------------------
+
+  /**
+   * Resolve which room a connection is talking about.
+   *
+   * Order: an explicitly supplied room code, the connection's own binding, and only
+   * as a last resort the newest room this identity still belongs to. The fallback
+   * never runs on socket open (see `registerClient`), so an abandoned room can no
+   * longer hijack a live connection.
+   */
+  private resolveRoomForClient(
+    client: ConnectedClient,
+    explicitRoomCode?: string
+  ): PvpRoomState | undefined {
+    if (explicitRoomCode) {
+      const explicit = this.rooms.get(explicitRoomCode.toUpperCase().trim());
+      if (explicit) return explicit;
+    }
+    if (client.roomCode) {
+      const bound = this.rooms.get(client.roomCode);
+      if (bound) return bound;
+      client.roomCode = undefined;
+    }
+    const fallback = this.findNewestRoomForPlayer(client.playerId);
+    if (fallback) {
+      console.warn(
+        `[PVP] ${client.connId} had no room binding; falling back to newest membership ${fallback.roomCode}`
+      );
+    }
+    return fallback;
+  }
+
+  private findNewestRoomForPlayer(playerId: string): PvpRoomState | undefined {
+    let newest: PvpRoomState | undefined;
+    for (const room of this.rooms.values()) {
+      if (!room.players[playerId] && !room.spectators[playerId]) continue;
+      if (!newest || (room.createdAt || 0) > (newest.createdAt || 0)) {
+        newest = room;
+      }
+    }
+    return newest;
+  }
+
+  /**
+   * Detect a seat in another live match. Joining a second match while one is
+   * running would silently abandon the first one, so it is refused.
+   */
+  private findActiveMatchElsewhere(playerId: string, keepRoomCode: string): PvpRoomState | undefined {
+    for (const room of this.rooms.values()) {
+      if (room.roomCode === keepRoomCode) continue;
+      if (!room.players[playerId]) continue;
+      if (room.status === 'IN_PROGRESS' || room.status === 'COUNTDOWN') return room;
+    }
+    return undefined;
+  }
+
+  /**
+   * Release this identity from every room except the one being entered.
+   *
+   * Why this exists: abandoned waiting rooms used to accumulate the same playerId
+   * forever (cleanup only ran every 5 minutes and never dropped members), so any
+   * later reconnect or broadcast from that dead room leaked into the live match.
+   *
+   * Player seats inside a *running* match are never touched here; such seats are
+   * handled by `findActiveMatchElsewhere` (new joins are refused) or left alone
+   * (existing players just re-bind). Spectator seats elsewhere are always dropped:
+   * watching another room must never keep a stale seat alive.
+   */
+  private detachFromOtherRooms(
+    playerId: string,
+    keepRoomCode: string,
+    opts: { asPlayer: boolean }
+  ): void {
+    for (const room of Array.from(this.rooms.values())) {
+      if (room.roomCode === keepRoomCode) continue;
+      const seatIsPlayer = !!room.players[playerId];
+      const seatIsSpectator = !!room.spectators[playerId];
+      if (!seatIsPlayer && !seatIsSpectator) continue;
+
+      let changed = false;
+
+      if (seatIsSpectator) {
+        delete room.spectators[playerId];
+        changed = true;
+        console.log(`[PVP] Released spectator seat of ${playerId} from room ${room.roomCode}`);
+      }
+
+      if (seatIsPlayer && opts.asPlayer) {
+        const isLiveMatch = room.status === 'IN_PROGRESS' || room.status === 'COUNTDOWN';
+        if (isLiveMatch) {
+          console.log(
+            `[PVP] Keeping player seat of ${playerId} in live room ${room.roomCode} (status=${room.status})`
+          );
+        } else {
+          delete room.players[playerId];
+          changed = true;
+          console.log(
+            `[PVP] Detached player ${playerId} from stale room ${room.roomCode} (status=${room.status})`
+          );
+        }
+      }
+
+      if (!changed) continue;
+
+      const remainingPlayers = Object.values(room.players);
+      if (remainingPlayers.length === 0) {
+        // An empty room is unusable: nobody can play, everyone else is watching a
+        // match that will never start.
+        console.log(`[PVP] Room ${room.roomCode} has no players left after detach, deleting.`);
+        this.deleteRoom(room.roomCode);
+        continue;
+      }
+
+      if (!remainingPlayers.some((p) => p.isHost)) {
+        remainingPlayers[0].isHost = true;
+      }
+      this.recalculateLobbyStatus(room);
+      this.broadcastRoomState(room.roomCode);
+    }
+  }
+
+  private recalculateLobbyStatus(room: PvpRoomState): void {
+    if (room.status !== 'WAITING' && room.status !== 'READY') return;
+    const players = Object.values(room.players);
+    room.status = players.length >= 2 && players.every((p) => p.isReady) ? 'READY' : 'WAITING';
+  }
+
+  private ensureSpectatorSeat(
+    room: PvpRoomState,
+    playerId: string,
+    nickname: string | undefined,
+    anonymous: boolean
+  ): SpectatorState {
+    const existing = room.spectators[playerId];
+    if (existing) {
+      existing.isOnline = true;
+      if (nickname && nickname.trim()) existing.nickname = nickname.trim().slice(0, 16);
+      return existing;
+    }
+    const seat: SpectatorState = {
+      playerId,
+      nickname: (nickname && nickname.trim() ? nickname : `观众${Object.keys(room.spectators).length + 1}`)
+        .trim()
+        .slice(0, 16),
+      isOnline: true,
+      isAnonymous: anonymous,
+      joinedAt: Date.now(),
+    };
+    room.spectators[playerId] = seat;
+    return seat;
+  }
+
+  // --- Room lifecycle -------------------------------------------------------
 
   private generateRoomCode(): string {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Avoid confusing chars like 0/O, 1/I
@@ -155,7 +364,7 @@ class PvpManager {
   }
 
   private createRoom(
-    playerId: string,
+    client: ConnectedClient,
     payload: {
       nickname: string;
       year?: number;
@@ -164,6 +373,20 @@ class PvpManager {
       allowSpectators?: boolean;
     }
   ) {
+    const playerId = client.playerId;
+    if (client.spectatorOnly) {
+      return this.sendError(client, '观战席为只读模式，无法创建房间', 'SPECTATOR_READ_ONLY');
+    }
+
+    const activeElsewhere = this.findActiveMatchElsewhere(playerId, '');
+    if (activeElsewhere) {
+      return this.sendError(
+        client,
+        `你正在另一场进行中的对局（房间 ${activeElsewhere.roomCode}）里，请先结束该对局`,
+        'ALREADY_IN_MATCH'
+      );
+    }
+
     const code = this.generateRoomCode();
     const duration =
       payload.durationMinutes &&
@@ -206,6 +429,7 @@ class PvpManager {
       status: 'WAITING',
       maxPlayers,
       allowSpectators,
+      spectateTicket: allowSpectators ? generateSpectateTicket(code) : undefined,
       createdAt: Date.now(),
       players: {
         [playerId]: hostPlayer,
@@ -214,11 +438,13 @@ class PvpManager {
     };
 
     this.rooms.set(code, roomState);
-    const client = this.clients.get(playerId);
-    if (client) {
-      client.roomCode = code;
-      client.isSpectator = false;
-    }
+    client.roomCode = code;
+    client.role = 'player';
+    if (payload.nickname) client.nickname = payload.nickname.trim().slice(0, 16);
+
+    // Leave any abandoned lobby behind so it can never broadcast into this room's
+    // live connections later.
+    this.detachFromOtherRooms(playerId, code, { asPlayer: true });
 
     console.log(
       `[PVP] Created room ${code} (maxPlayers=${maxPlayers}, spectators=${allowSpectators}) by ${hostPlayer.nickname} (${playerId}), Year: ${exam.year}`
@@ -227,127 +453,98 @@ class PvpManager {
   }
 
   private joinRoom(
-    playerId: string,
+    client: ConnectedClient,
     payload: { roomCode: string; nickname: string; asSpectator?: boolean }
   ) {
+    const playerId = client.playerId;
     const code = (payload.roomCode || '').toUpperCase().trim();
     const room = this.rooms.get(code);
 
     if (!room) {
-      console.warn(`[PVP] Room join failed, room not found: "${code}". Current active rooms: [${Array.from(this.rooms.keys()).join(', ')}]`);
-      return this.sendError(playerId, `未找到房间号：${code}（请检查房间号是否正确或已被房主解散）`);
+      console.warn(
+        `[PVP] Room join failed, room not found: "${code}". Current active rooms: [${Array.from(this.rooms.keys()).join(', ')}]`
+      );
+      return this.sendError(
+        client,
+        `未找到房间号：${code}（请检查房间号是否正确或已被房主解散）`,
+        'ROOM_NOT_FOUND'
+      );
+    }
+
+    if (payload.nickname) client.nickname = payload.nickname.trim().slice(0, 16);
+
+    // Ticket connections are locked to their own room and to the spectator role.
+    if (client.spectatorOnly) {
+      if (client.roomCode !== code) {
+        return this.sendError(client, '观战链接与房间不匹配', 'SPECTATE_ROOM_MISMATCH');
+      }
+      return this.refreshSpectatorSeat(client, room, payload.nickname, true);
     }
 
     const existingPlayer = room.players[playerId];
-    const existingSpectator = room.spectators[playerId];
 
-    // Reconnecting / Rejoining participant
+    // A player seat always wins over a spectator seat in the same room.
     if (existingPlayer) {
       existingPlayer.isOnline = true;
       existingPlayer.lastActiveAt = Date.now();
-      if (payload.nickname) {
-        existingPlayer.nickname = payload.nickname.trim().slice(0, 16);
-      }
-      const client = this.clients.get(playerId);
-      if (client) {
-        client.roomCode = code;
-        client.isSpectator = false;
-      }
+      if (payload.nickname) existingPlayer.nickname = payload.nickname.trim().slice(0, 16);
+      client.roomCode = code;
+      client.role = 'player';
+      this.detachFromOtherRooms(playerId, code, { asPlayer: true });
+      console.log(
+        `[PVP] Player ${existingPlayer.nickname} (${playerId}) re-bound to room ${code} (status=${room.status})`
+      );
+      this.sendToClient(client, { type: 'room:state', payload: room });
       this.broadcastRoomState(code);
       return;
     }
 
-    if (existingSpectator) {
-      existingSpectator.isOnline = true;
-      if (payload.nickname) {
-        existingSpectator.nickname = payload.nickname.trim().slice(0, 16);
-      }
-      const client = this.clients.get(playerId);
-      if (client) {
-        client.roomCode = code;
-        client.isSpectator = true;
-      }
-      this.broadcastRoomState(code);
-      return;
-    }
-
-    // Explicit request to join as spectator
+    // Explicit request to watch instead of play.
     if (payload.asSpectator) {
-      if (room.allowSpectators === false) {
-        return this.sendError(playerId, '该房间未开启观战功能', 'SPECTATING_NOT_ALLOWED');
-      }
-      const nickname = (payload.nickname || `观众${Object.keys(room.spectators).length + 1}`).trim().slice(0, 16);
-      room.spectators[playerId] = {
-        playerId,
-        nickname,
-        isOnline: true,
-        joinedAt: Date.now(),
-      };
-      const client = this.clients.get(playerId);
-      if (client) {
-        client.roomCode = code;
-        client.isSpectator = true;
-      }
-      console.log(`[PVP] Player ${nickname} (${playerId}) joined room ${code} as spectator.`);
-      this.broadcastRoomState(code);
-      return;
+      return this.refreshSpectatorSeat(client, room, payload.nickname, false);
     }
 
-    // Attempting to join as player
-    // If match is already in progress or finished:
+    const activeElsewhere = this.findActiveMatchElsewhere(playerId, code);
+    if (activeElsewhere) {
+      return this.sendError(
+        client,
+        `你正在另一场进行中的对局（房间 ${activeElsewhere.roomCode}）里，请先结束该对局`,
+        'ALREADY_IN_MATCH'
+      );
+    }
+
+    // If match is already in progress or finished, hand the joiner a spectator seat.
     if (room.status !== 'WAITING' && room.status !== 'READY') {
       if (room.allowSpectators !== false) {
-        const nickname = (payload.nickname || `观众${Object.keys(room.spectators).length + 1}`).trim().slice(0, 16);
-        room.spectators[playerId] = {
-          playerId,
-          nickname,
-          isOnline: true,
-          joinedAt: Date.now(),
-        };
-        const client = this.clients.get(playerId);
-        if (client) {
-          client.roomCode = code;
-          client.isSpectator = true;
-        }
-        this.sendToPlayer(playerId, {
+        this.refreshSpectatorSeat(client, room, payload.nickname, false);
+        this.sendToClient(client, {
           type: 'room:joined_as_spectator',
           payload: { message: '对战已在进行中，已自动为您开启实时观战席位' },
         });
-        console.log(`[PVP] Player ${nickname} (${playerId}) auto-joined room ${code} as spectator (match active).`);
-        this.broadcastRoomState(code);
         return;
       }
-      return this.sendError(playerId, '对战已开始或已结束，无法加入', 'MATCH_ALREADY_STARTED');
+      return this.sendError(client, '对战已开始或已结束，无法加入', 'MATCH_ALREADY_STARTED');
     }
 
     // Room is WAITING or READY: check player capacity
     const currentPlayerCount = Object.keys(room.players).length;
     if (currentPlayerCount >= room.maxPlayers) {
       if (room.allowSpectators !== false) {
-        const nickname = (payload.nickname || `观众${Object.keys(room.spectators).length + 1}`).trim().slice(0, 16);
-        room.spectators[playerId] = {
-          playerId,
-          nickname,
-          isOnline: true,
-          joinedAt: Date.now(),
-        };
-        const client = this.clients.get(playerId);
-        if (client) {
-          client.roomCode = code;
-          client.isSpectator = true;
-        }
-        this.sendToPlayer(playerId, {
+        this.refreshSpectatorSeat(client, room, payload.nickname, false);
+        this.sendToClient(client, {
           type: 'room:joined_as_spectator',
           payload: { message: `选手席位已满（上限 ${room.maxPlayers} 人），已自动为您转入观战席位` },
         });
-        console.log(`[PVP] Player ${nickname} (${playerId}) auto-joined room ${code} as spectator (player capacity reached).`);
-        this.broadcastRoomState(code);
         return;
       }
-      return this.sendError(playerId, `房间已满（上限 ${room.maxPlayers} 人对战）`, 'ROOM_FULL');
+      return this.sendError(client, `房间已满（上限 ${room.maxPlayers} 人对战）`, 'ROOM_FULL');
     }
 
-    // New challenger player slot
+    // New player seat (possibly standing up from this room's spectator gallery).
+    const wasSpectator = !!room.spectators[playerId];
+    this.detachFromOtherRooms(playerId, code, { asPlayer: true });
+    if (wasSpectator) delete room.spectators[playerId];
+
     const playerNumber = currentPlayerCount + 1;
     const nickname = (payload.nickname || `玩家${playerNumber}`).trim().slice(0, 16);
     room.players[playerId] = {
@@ -363,34 +560,75 @@ class PvpManager {
       isFinished: false,
     };
 
-    const client = this.clients.get(playerId);
-    if (client) {
-      client.roomCode = code;
-      client.isSpectator = false;
-    }
+    client.roomCode = code;
+    client.role = 'player';
+    if (room.status === 'READY') room.status = 'WAITING'; // a fresh seat invalidates all-ready
 
     console.log(
       `[PVP] Player ${nickname} (${playerId}) joined room ${code}. Total players: ${Object.keys(room.players).length}/${room.maxPlayers}`
     );
+    this.sendToClient(client, { type: 'room:state', payload: room });
     this.broadcastRoomState(code);
   }
 
-  private switchRole(playerId: string, payload: { targetRole: 'player' | 'spectator' }) {
-    const client = this.clients.get(playerId);
-    if (!client?.roomCode) return;
-    const room = this.rooms.get(client.roomCode);
-    if (!room) return;
-
-    if (room.status !== 'WAITING' && room.status !== 'READY') {
-      return this.sendError(playerId, '比赛进行中无法切换身份');
+  /** Seat a viewer (link spectator or account spectator) without touching player seats. */
+  private refreshSpectatorSeat(
+    client: ConnectedClient,
+    room: PvpRoomState,
+    nickname: string | undefined,
+    anonymous: boolean
+  ): void {
+    if (room.allowSpectators === false) {
+      return this.sendError(client, '该房间未开启观战功能', 'SPECTATING_NOT_ALLOWED');
     }
 
+    this.detachFromOtherRooms(client.playerId, room.roomCode, { asPlayer: false });
+
+    const seat = this.ensureSpectatorSeat(room, client.playerId, nickname, anonymous);
+    seat.isOnline = true;
+    client.roomCode = room.roomCode;
+    client.role = 'spectator';
+    if (nickname && nickname.trim()) client.nickname = nickname.trim().slice(0, 16);
+
+    console.log(
+      `[PVP] ${anonymous ? 'Link spectator' : 'Spectator'} "${seat.nickname}" (${client.playerId}) watching room ${room.roomCode}`
+    );
+    this.sendToClient(client, { type: 'room:state', payload: room });
+    this.broadcastRoomState(room.roomCode);
+  }
+
+  private switchRole(client: ConnectedClient, payload: { targetRole: 'player' | 'spectator' }) {
+    if (client.spectatorOnly) {
+      return this.sendError(client, '观战链接为只读模式，如需参赛请使用参赛链接', 'SPECTATOR_READ_ONLY');
+    }
+    if (!client.roomCode) {
+      return this.sendError(client, '你当前不在任何房间中', 'ROOM_NOT_BOUND');
+    }
+    const room = this.rooms.get(client.roomCode);
+    if (!room) {
+      client.roomCode = undefined;
+      return this.sendError(client, '房间已失效，请重新加入', 'ROOM_NOT_FOUND');
+    }
+
+    if (room.status !== 'WAITING' && room.status !== 'READY') {
+      return this.sendError(client, '比赛进行中无法切换身份');
+    }
+
+    const playerId = client.playerId;
     const { targetRole } = payload;
     if (targetRole === 'player') {
       // Spectator switching to player
       if (!room.spectators[playerId]) return;
       if (Object.keys(room.players).length >= room.maxPlayers) {
-        return this.sendError(playerId, `选手席位已满（上限 ${room.maxPlayers} 人）`);
+        return this.sendError(client, `选手席位已满（上限 ${room.maxPlayers} 人）`);
+      }
+      const activeElsewhere = this.findActiveMatchElsewhere(playerId, room.roomCode);
+      if (activeElsewhere) {
+        return this.sendError(
+          client,
+          `你正在另一场进行中的对局（房间 ${activeElsewhere.roomCode}）里，请先结束该对局`,
+          'ALREADY_IN_MATCH'
+        );
       }
       const spec = room.spectators[playerId];
       delete room.spectators[playerId];
@@ -406,14 +644,14 @@ class PvpManager {
         totalScore: 0,
         isFinished: false,
       };
-      client.isSpectator = false;
+      client.role = 'player';
       room.status = 'WAITING';
       this.broadcastRoomState(room.roomCode);
     } else if (targetRole === 'spectator') {
       // Player switching to spectator
       if (!room.players[playerId]) return;
       if (room.allowSpectators === false) {
-        return this.sendError(playerId, '该房间未开启观战席');
+        return this.sendError(client, '该房间未开启观战席');
       }
       const player = room.players[playerId];
       const otherPlayers = Object.values(room.players).filter((p) => p.playerId !== playerId);
@@ -421,7 +659,7 @@ class PvpManager {
         if (otherPlayers.length > 0) {
           otherPlayers[0].isHost = true;
         } else {
-          return this.sendError(playerId, '房间内只有房主一人，无法转为观战');
+          return this.sendError(client, '房间内只有房主一人，无法转为观战');
         }
       }
       delete room.players[playerId];
@@ -429,32 +667,34 @@ class PvpManager {
         playerId,
         nickname: player.nickname,
         isOnline: true,
+        isAnonymous: false,
         joinedAt: Date.now(),
       };
-      client.isSpectator = true;
+      client.role = 'spectator';
       room.status = 'WAITING';
       this.broadcastRoomState(room.roomCode);
     }
   }
 
-  private startEarly(playerId: string) {
-    const client = this.clients.get(playerId);
-    if (!client?.roomCode) return;
-    const room = this.rooms.get(client.roomCode);
+  private startEarly(client: ConnectedClient) {
+    if (client.spectatorOnly) {
+      return this.sendError(client, '观战席为只读模式，无法操作对局', 'SPECTATOR_READ_ONLY');
+    }
+    const room = this.resolveRoomForClient(client);
     if (!room || (room.status !== 'WAITING' && room.status !== 'READY')) return;
 
-    const player = room.players[playerId];
+    const player = room.players[client.playerId];
     if (!player || !player.isHost) {
-      return this.sendError(playerId, '只有房主可以提前开赛');
+      return this.sendError(client, '只有房主可以提前开赛');
     }
 
     const players = Object.values(room.players);
     if (players.length < 2) {
-      return this.sendError(playerId, '至少需要 2 位选手才能开启比赛');
+      return this.sendError(client, '至少需要 2 位选手才能开启比赛');
     }
 
     if (!players.every((p) => p.isReady)) {
-      return this.sendError(playerId, '所有在场选手均需“准备就绪”才能开赛');
+      return this.sendError(client, '所有在场选手均需“准备就绪”才能开赛');
     }
 
     console.log(
@@ -464,7 +704,7 @@ class PvpManager {
   }
 
   private updateRoomSettings(
-    playerId: string,
+    client: ConnectedClient,
     payload: {
       year?: number;
       durationMinutes?: number;
@@ -472,14 +712,15 @@ class PvpManager {
       allowSpectators?: boolean;
     }
   ) {
-    const client = this.clients.get(playerId);
-    if (!client?.roomCode) return;
-    const room = this.rooms.get(client.roomCode);
+    if (client.spectatorOnly) {
+      return this.sendError(client, '观战席为只读模式，无法修改房间设置', 'SPECTATOR_READ_ONLY');
+    }
+    const room = this.resolveRoomForClient(client);
     if (!room || room.status !== 'WAITING') return;
 
-    const player = room.players[playerId];
+    const player = room.players[client.playerId];
     if (!player || !player.isHost) {
-      return this.sendError(playerId, '只有房主可以更改房间设置');
+      return this.sendError(client, '只有房主可以更改房间设置');
     }
 
     if (payload.year) {
@@ -499,7 +740,7 @@ class PvpManager {
         room.maxPlayers = payload.maxPlayers;
       } else {
         return this.sendError(
-          playerId,
+          client,
           `当前已有 ${Object.keys(room.players).length} 名选手在场，无法将人数设为 ${payload.maxPlayers}`
         );
       }
@@ -507,20 +748,25 @@ class PvpManager {
 
     if (typeof payload.allowSpectators === 'boolean') {
       room.allowSpectators = payload.allowSpectators;
+      if (payload.allowSpectators && !room.spectateTicket) {
+        room.spectateTicket = generateSpectateTicket(room.roomCode);
+      }
     }
 
-    this.broadcastRoomState(client.roomCode);
+    this.broadcastRoomState(room.roomCode);
   }
 
-  private toggleReady(playerId: string) {
-    const client = this.clients.get(playerId);
-    if (!client?.roomCode) return;
-    const room = this.rooms.get(client.roomCode);
-    if (!room) return;
-
+  private toggleReady(client: ConnectedClient) {
+    if (client.spectatorOnly) {
+      return this.sendError(client, '观战席为只读模式，无法准备对局', 'SPECTATOR_READ_ONLY');
+    }
+    const room = this.resolveRoomForClient(client);
+    if (!room) {
+      return this.sendError(client, '房间已失效，请重新加入', 'ROOM_NOT_FOUND');
+    }
     if (room.status !== 'WAITING' && room.status !== 'READY') return;
 
-    const player = room.players[playerId];
+    const player = room.players[client.playerId];
     if (!player) return;
 
     player.isReady = !player.isReady;
@@ -543,6 +789,11 @@ class PvpManager {
 
     let remaining = countdownSeconds;
     const timer = setInterval(() => {
+      if (this.rooms.get(room.roomCode) !== room) {
+        clearInterval(timer);
+        this.countdownTimers.delete(room.roomCode);
+        return;
+      }
       remaining -= 1;
       if (remaining > 0) {
         this.broadcast(room.roomCode, {
@@ -551,12 +802,16 @@ class PvpManager {
         });
       } else {
         clearInterval(timer);
+        this.countdownTimers.delete(room.roomCode);
         this.startMatch(room);
       }
     }, 1000);
+    this.countdownTimers.set(room.roomCode, timer);
   }
 
   private startMatch(room: PvpRoomState) {
+    if (this.rooms.get(room.roomCode) !== room) return;
+
     room.status = 'IN_PROGRESS';
     room.startedAt = Date.now();
     const durationMs = room.durationMinutes * 60 * 1000;
@@ -720,23 +975,30 @@ class PvpManager {
   }
 
   private submitSegment(
-    playerId: string,
+    client: ConnectedClient,
     payload: { segmentIndex: number; studentAnswer: string }
   ) {
-    const client = this.clients.get(playerId);
-    if (!client?.roomCode) return;
-    const room = this.rooms.get(client.roomCode);
-    if (!room) return;
+    if (client.spectatorOnly) {
+      return this.sendError(client, '观战席为只读模式，无法提交译文', 'SPECTATOR_READ_ONLY');
+    }
+    const playerId = client.playerId;
+    const room = this.resolveRoomForClient(client);
+    if (!room) {
+      return this.sendError(client, '房间已失效，请重新加入', 'ROOM_NOT_FOUND');
+    }
+    client.roomCode = room.roomCode;
 
     if (room.status !== 'IN_PROGRESS') {
-      return this.sendError(playerId, '对战未在进行中，无法提交', 'NOT_IN_PROGRESS');
+      return this.sendError(client, '对战未在进行中，无法提交', 'NOT_IN_PROGRESS');
     }
 
     const player = room.players[playerId];
-    if (!player) return;
+    if (!player) {
+      return this.sendError(client, '你当前不在该房间的选手席中', 'NOT_A_PLAYER');
+    }
 
     if (player.isFinished) {
-      return this.sendError(playerId, '你已交卷，无法继续提交', 'ALREADY_FINISHED');
+      return this.sendError(client, '你已交卷，无法继续提交', 'ALREADY_FINISHED');
     }
 
     const segmentIdx = Number(payload.segmentIndex);
@@ -744,12 +1006,12 @@ class PvpManager {
       console.warn(
         `[PVP] Invalid segment index ${JSON.stringify(payload.segmentIndex)} from player ${player.nickname} (${playerId}) in room ${room.roomCode}`
       );
-      return this.sendError(playerId, '题目序号无效，请刷新页面后重试', 'INVALID_SEGMENT');
+      return this.sendError(client, '题目序号无效，请刷新页面后重试', 'INVALID_SEGMENT');
     }
 
     const answer = (payload.studentAnswer || '').trim();
     if (!answer) {
-      return this.sendError(playerId, '译文不能为空', 'EMPTY_ANSWER');
+      return this.sendError(client, '译文不能为空', 'EMPTY_ANSWER');
     }
 
     // Idempotency: never overwrite an already accepted answer
@@ -758,7 +1020,7 @@ class PvpManager {
       console.log(
         `[PVP] Duplicate submit ignored for player ${player.nickname} (${playerId}) segment ${segmentIdx + 1} in room ${room.roomCode}`
       );
-      this.sendToPlayer(playerId, { type: 'room:state', payload: room });
+      this.sendToClient(client, { type: 'room:state', payload: room });
       return;
     }
 
@@ -968,17 +1230,7 @@ class PvpManager {
     const room = this.rooms.get(roomCode);
     if (!room || room.status === 'FINISHED') return;
 
-    const timer = this.matchTimers.get(roomCode);
-    if (timer) {
-      clearTimeout(timer);
-      this.matchTimers.delete(roomCode);
-    }
-
-    const guardrail = this.guardrailTimers.get(roomCode);
-    if (guardrail) {
-      clearTimeout(guardrail);
-      this.guardrailTimers.delete(roomCode);
-    }
+    this.clearRoomTimers(roomCode);
 
     const playerList = Object.values(room.players);
 
@@ -1098,129 +1350,163 @@ class PvpManager {
     this.broadcastRoomState(roomCode);
   }
 
-  private reconnectRoom(playerId: string, payload: { roomCode?: string }) {
-    let room: PvpRoomState | undefined;
-    if (payload.roomCode) {
-      room = this.rooms.get(payload.roomCode.toUpperCase().trim());
+  private reconnectRoom(client: ConnectedClient, payload: { roomCode?: string }) {
+    const playerId = client.playerId;
+    const explicit = payload.roomCode ? payload.roomCode.toUpperCase().trim() : undefined;
+
+    // Pick the first candidate room that actually contains this identity: the
+    // explicitly requested room first, then this connection's previous binding,
+    // then the newest membership. Never blindly trust a room code.
+    const candidates: PvpRoomState[] = [];
+    if (explicit) {
+      const requested = this.rooms.get(explicit);
+      if (requested) candidates.push(requested);
     }
+    if (client.roomCode && client.roomCode !== explicit) {
+      const bound = this.rooms.get(client.roomCode);
+      if (bound) candidates.push(bound);
+    }
+    const newest = this.findNewestRoomForPlayer(playerId);
+    if (newest && !candidates.includes(newest)) candidates.push(newest);
+
+    const room = candidates.find((r) => !!r.players[playerId] || !!r.spectators[playerId]);
+
     if (!room) {
-      room = this.findRoomByPlayerId(playerId);
+      console.warn(`[PVP] Reconnect failed for user ${playerId} (conn=${client.connId}), room not found`);
+      return this.sendError(client, '对战已结束或房间已失效', 'ROOM_NOT_FOUND');
     }
 
-    if (room) {
-      const isPlayer = !!room.players[playerId];
-      const isSpectator = !!room.spectators[playerId];
+    const isPlayer = !!room.players[playerId];
+    const isSpectator = !!room.spectators[playerId];
+    if (client.spectatorOnly && !isSpectator) {
+      return this.sendError(client, '对战已结束或房间已失效', 'ROOM_NOT_FOUND');
+    }
 
-      if (isPlayer || isSpectator) {
-        const client = this.clients.get(playerId);
-        if (client) {
-          client.roomCode = room.roomCode;
-          client.isSpectator = isSpectator;
-        }
+    client.roomCode = room.roomCode;
+    client.role = isPlayer ? 'player' : 'spectator';
 
-        if (isPlayer) {
-          const player = room.players[playerId];
-          player.isOnline = true;
-          player.lastActiveAt = Date.now();
-          console.log(
-            `[PVP] Manual reconnect successful for player ${playerId} into room ${room.roomCode} ` +
-              `(status=${room.status}, segment=${player.currentSegmentIndex + 1})`
-          );
-        } else {
-          const spec = room.spectators[playerId];
-          spec.isOnline = true;
-          console.log(
-            `[PVP] Manual reconnect successful for spectator ${playerId} into room ${room.roomCode}`
-          );
-        }
+    if (isPlayer) {
+      const player = room.players[playerId];
+      player.isOnline = true;
+      player.lastActiveAt = Date.now();
+      console.log(
+        `[PVP] Manual reconnect successful for player ${playerId} into room ${room.roomCode} ` +
+          `(status=${room.status}, segment=${player.currentSegmentIndex + 1})`
+      );
+    } else {
+      const spec = room.spectators[playerId];
+      spec.isOnline = true;
+      console.log(
+        `[PVP] Manual reconnect successful for spectator ${playerId} into room ${room.roomCode}`
+      );
+    }
 
-        this.sendToPlayer(playerId, {
-          type: 'room:state',
-          payload: room,
-        });
+    this.sendToClient(client, {
+      type: 'room:state',
+      payload: room,
+    });
+    this.broadcastRoomState(room.roomCode);
+  }
+
+  private leaveRoom(client: ConnectedClient) {
+    const playerId = client.playerId;
+    const room = this.resolveRoomForClient(client);
+    if (!room) {
+      client.roomCode = undefined;
+      return;
+    }
+
+    if (room.spectators[playerId] && client.role === 'spectator') {
+      console.log(`[PVP] Spectator ${playerId} explicitly left room ${room.roomCode}`);
+      delete room.spectators[playerId];
+      client.roomCode = undefined;
+      if (Object.keys(room.players).length === 0) {
+        this.deleteRoom(room.roomCode);
+      } else {
         this.broadcastRoomState(room.roomCode);
+      }
+      return;
+    }
+
+    if (room.spectators[playerId]) {
+      delete room.spectators[playerId];
+      if (Object.keys(room.players).length === 0) {
+        this.deleteRoom(room.roomCode);
         return;
       }
     }
 
-    console.warn(`[PVP] Reconnect failed for user ${playerId}, room not found`);
-    this.sendError(playerId, '对战已结束或房间已失效', 'ROOM_NOT_FOUND');
-  }
-
-  private leaveRoom(playerId: string) {
-    const client = this.clients.get(playerId);
-    const roomCode = client?.roomCode;
-    if (!roomCode) return;
-    const room = this.rooms.get(roomCode);
-    if (!room) return;
-
-    if (room.spectators[playerId]) {
-      console.log(`[PVP] Spectator ${playerId} explicitly left room ${roomCode}`);
-      delete room.spectators[playerId];
-      client.roomCode = undefined;
-      client.isSpectator = false;
-      this.broadcastRoomState(room.roomCode);
-      return;
-    }
-
     if (room.players[playerId]) {
-      console.log(`[PVP] Player ${playerId} explicitly left room ${roomCode}`);
+      console.log(`[PVP] Player ${playerId} explicitly left room ${room.roomCode}`);
       delete room.players[playerId];
       client.roomCode = undefined;
-      client.isSpectator = false;
 
       const remainingPlayers = Object.values(room.players);
       if (remainingPlayers.length === 0) {
-        console.log(`[PVP] Room ${roomCode} has 0 players left, deleting.`);
-        this.rooms.delete(room.roomCode);
-        const timer = this.matchTimers.get(room.roomCode);
-        if (timer) {
-          clearTimeout(timer);
-          this.matchTimers.delete(room.roomCode);
-        }
-        const guardrail = this.guardrailTimers.get(room.roomCode);
-        if (guardrail) {
-          clearTimeout(guardrail);
-          this.guardrailTimers.delete(room.roomCode);
-        }
+        console.log(`[PVP] Room ${room.roomCode} has 0 players left, deleting.`);
+        this.deleteRoom(room.roomCode);
       } else {
         if (!remainingPlayers.some((p) => p.isHost)) {
           remainingPlayers[0].isHost = true;
         }
         if (room.status === 'IN_PROGRESS') {
           this.checkAllFinished(room);
+        } else {
+          this.recalculateLobbyStatus(room);
         }
         this.broadcastRoomState(room.roomCode);
       }
-    }
-  }
-
-  private handleDisconnect(playerId: string, ws?: WebSocket) {
-    const currentSocket = this.playerSockets.get(playerId);
-    if (ws && currentSocket && currentSocket !== ws) {
-      console.log(`[PVP] Ignoring close event from stale socket for player ${playerId} (live socket still registered)`);
       return;
     }
 
-    const room = this.findRoomByPlayerId(playerId);
-    if (room) {
-      if (room.players[playerId]) {
-        room.players[playerId].isOnline = false;
-        room.players[playerId].lastActiveAt = Date.now();
-        console.log(
-          `[PVP] Socket disconnected for player ${room.players[playerId].nickname} (${playerId}) in room ${room.roomCode}. Room preserved.`
-        );
-      } else if (room.spectators[playerId]) {
-        room.spectators[playerId].isOnline = false;
-        console.log(
-          `[PVP] Socket disconnected for spectator ${room.spectators[playerId].nickname} (${playerId}) in room ${room.roomCode}.`
-        );
-      }
-      this.broadcastRoomState(room.roomCode);
+    // Bound to a room without a seat (should not happen): just drop the binding.
+    client.roomCode = undefined;
+  }
+
+  private handleDisconnect(connId: string) {
+    const client = this.clients.get(connId);
+    if (!client) return;
+    this.clients.delete(connId);
+
+    const sockets = this.playerSockets.get(client.playerId);
+    if (sockets) {
+      sockets.delete(client.ws);
+      if (sockets.size === 0) this.playerSockets.delete(client.playerId);
     }
 
-    this.playerSockets.delete(playerId);
+    // Another tab of the same identity is still connected: nothing is offline.
+    if ((this.playerSockets.get(client.playerId)?.size ?? 0) > 0) {
+      console.log(
+        `[PVP] Connection ${connId} closed; player ${client.playerId} still has live sockets, no offline marking`
+      );
+      return;
+    }
+
+    // Last socket for this identity: mark it offline in every room it belongs to.
+    for (const room of Array.from(this.rooms.values())) {
+      let changed = false;
+      const player = room.players[client.playerId];
+      if (player) {
+        player.isOnline = false;
+        player.lastActiveAt = Date.now();
+        changed = true;
+        console.log(
+          `[PVP] Socket disconnected for player ${player.nickname} (${client.playerId}) in room ${room.roomCode}. Room preserved.`
+        );
+      }
+      const spec = room.spectators[client.playerId];
+      if (spec) {
+        spec.isOnline = false;
+        changed = true;
+        console.log(
+          `[PVP] Socket disconnected for spectator ${spec.nickname} (${client.playerId}) in room ${room.roomCode}.`
+        );
+      }
+      if (changed) this.broadcastRoomState(room.roomCode);
+    }
   }
+
+  // --- Delivery -------------------------------------------------------------
 
   private broadcast(roomCode: string, message: any) {
     const room = this.rooms.get(roomCode);
@@ -1233,10 +1519,7 @@ class PvpManager {
     ]);
 
     for (const pid of recipients) {
-      const ws = this.playerSockets.get(pid);
-      if (ws && ws.readyState === 1 /* OPEN */) {
-        ws.send(data);
-      }
+      this.sendRawToPlayer(pid, data);
     }
   }
 
@@ -1249,57 +1532,105 @@ class PvpManager {
     });
   }
 
-  private sendToPlayer(playerId: string, message: any) {
-    const ws = this.playerSockets.get(playerId);
-    if (ws && ws.readyState === 1) {
-      ws.send(JSON.stringify(message));
+  /** Deliver a raw frame to every live socket of an identity (multi-tab safe). */
+  private sendRawToPlayer(playerId: string, data: string) {
+    const sockets = this.playerSockets.get(playerId);
+    if (!sockets) return;
+    for (const ws of sockets) {
+      if (ws.readyState === 1 /* OPEN */) {
+        try {
+          ws.send(data);
+        } catch (err) {
+          console.error(`[PVP] Failed to deliver frame to ${playerId}`, err);
+        }
+      }
     }
   }
 
-  private sendError(playerId: string, errorMessage: string, code?: string) {
-    this.sendToPlayer(playerId, {
+  private sendToClient(client: ConnectedClient, message: any) {
+    if (client.ws.readyState !== 1 /* OPEN */) return;
+    try {
+      client.ws.send(JSON.stringify(message));
+    } catch (err) {
+      console.error(`[PVP] Failed to reply to ${client.connId}`, err);
+    }
+  }
+
+  private sendError(client: ConnectedClient, errorMessage: string, code?: string) {
+    this.sendToClient(client, {
       type: 'error',
       payload: code ? { message: errorMessage, code } : { message: errorMessage },
     });
   }
 
+  // --- Cleanup --------------------------------------------------------------
+
+  private clearRoomTimers(roomCode: string) {
+    const timer = this.matchTimers.get(roomCode);
+    if (timer) {
+      clearTimeout(timer);
+      this.matchTimers.delete(roomCode);
+    }
+    const guardrail = this.guardrailTimers.get(roomCode);
+    if (guardrail) {
+      clearTimeout(guardrail);
+      this.guardrailTimers.delete(roomCode);
+    }
+    const countdown = this.countdownTimers.get(roomCode);
+    if (countdown) {
+      clearInterval(countdown);
+      this.countdownTimers.delete(roomCode);
+    }
+  }
+
+  private deleteRoom(roomCode: string) {
+    const room = this.rooms.get(roomCode);
+    if (!room) return;
+    this.clearRoomTimers(roomCode);
+    this.rooms.delete(roomCode);
+    for (const client of this.clients.values()) {
+      if (client.roomCode === roomCode) client.roomCode = undefined;
+    }
+    console.log(`[PVP] Room ${roomCode} removed`);
+  }
+
   private cleanupStaleRooms() {
     const now = Date.now();
-    for (const [code, room] of this.rooms.entries()) {
+    for (const [code, room] of Array.from(this.rooms.entries())) {
       // 1. Finished rooms older than 2 hours
-      if (room.status === 'FINISHED' && room.startedAt && now - room.startedAt > 2 * 3600 * 1000) {
+      if (
+        room.status === 'FINISHED' &&
+        room.startedAt &&
+        now - room.startedAt > FINISHED_ROOM_TTL_MS
+      ) {
         console.log(`[PVP] Cleaning up finished stale room ${code}`);
-        const timer = this.matchTimers.get(code);
-        if (timer) {
-          clearTimeout(timer);
-          this.matchTimers.delete(code);
-        }
-        const guardrail = this.guardrailTimers.get(code);
-        if (guardrail) {
-          clearTimeout(guardrail);
-          this.guardrailTimers.delete(code);
-        }
-        this.rooms.delete(code);
+        this.deleteRoom(code);
         continue;
       }
 
-      // 2. Waiting rooms with NO online participants for over 30 minutes
+      // 2. Recycle offline seats of link spectators (they carry no account and
+      //    would otherwise pile up in the gallery forever).
+      let seatsChanged = false;
+      for (const [pid, spec] of Object.entries(room.spectators)) {
+        if (
+          spec.isAnonymous &&
+          spec.isOnline === false &&
+          now - spec.joinedAt > OFFLINE_ANONYMOUS_SPECTATOR_MS
+        ) {
+          delete room.spectators[pid];
+          seatsChanged = true;
+          console.log(`[PVP] Recycled offline spectator seat ${pid} in room ${code}`);
+        }
+      }
+      if (seatsChanged) this.broadcastRoomState(code);
+
+      // 3. Waiting rooms with NO online participants for over 10 minutes
       const hasOnlinePlayers = Object.values(room.players).some((p) => p.isOnline);
       const hasOnlineSpectators = Object.values(room.spectators).some((s) => s.isOnline);
-      const isOldWaitingRoom = room.createdAt && now - room.createdAt > 30 * 60 * 1000;
+      const isOldWaitingRoom = room.createdAt && now - room.createdAt > ABANDONED_WAITING_ROOM_MS;
       if (room.status === 'WAITING' && !hasOnlinePlayers && !hasOnlineSpectators && isOldWaitingRoom) {
-        console.log(`[PVP] Cleaning up abandoned waiting room ${code} (inactive > 30m)`);
-        const timer = this.matchTimers.get(code);
-        if (timer) {
-          clearTimeout(timer);
-          this.matchTimers.delete(code);
-        }
-        const guardrail = this.guardrailTimers.get(code);
-        if (guardrail) {
-          clearTimeout(guardrail);
-          this.guardrailTimers.delete(code);
-        }
-        this.rooms.delete(code);
+        console.log(`[PVP] Cleaning up abandoned waiting room ${code} (inactive > 10m)`);
+        this.deleteRoom(code);
       }
     }
   }
