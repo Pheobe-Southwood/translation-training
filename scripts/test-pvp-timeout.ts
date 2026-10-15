@@ -188,8 +188,9 @@ async function testPvpTimeout() {
         }
       });
 
-      // 40s timeout for test
-      setTimeout(() => reject(new Error('Match settlement timed out after 40s')), 40000);
+      // Settlement waits for the in-flight paired grading call, which runs at the
+      // configured (max) reasoning effort: allow the full request budget.
+      setTimeout(() => reject(new Error('Match settlement timed out after 150s')), 150000);
     });
 
     hostWs.close();
