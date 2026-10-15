@@ -115,7 +115,8 @@ async function testPairedPvp() {
         })
       );
 
-      setTimeout(() => reject(new Error('Paired grading response timed out')), 15000);
+      // Grading runs at max reasoning effort, so allow the full request budget.
+      setTimeout(() => reject(new Error('Paired grading response timed out')), 150000);
     });
 
     hostWs.close();

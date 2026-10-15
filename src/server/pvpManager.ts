@@ -11,6 +11,7 @@ import type {
 import { getExamByYear, getRandomExam } from './examService.js';
 import { gradeTranslation, gradePvpPairTranslation } from './deepseek.js';
 import { generateSpectateTicket } from './auth.js';
+import { CONFIG } from './config.js';
 import { db } from './db.js';
 
 /**
@@ -928,11 +929,15 @@ class PvpManager {
     // Broadcast updated room state (so players know all inputs are locked)
     this.broadcastRoomState(room.roomCode);
 
-    // 120-second guardrail timer to prevent rooms getting permanently stuck
+    // Guardrail timer so a room can never stay stuck waiting on grading. Derived
+    // from the DeepSeek request budget (see CONFIG) so the two stay consistent.
+    const guardrailMs = CONFIG.pvpGradingGuardrailMs;
     const guardrail = setTimeout(() => {
-      console.warn(`[PVP] Guardrail timeout reached (120s) for room ${roomCode}. Force-finishing match.`);
+      console.warn(
+        `[PVP] Guardrail timeout reached (${Math.round(guardrailMs / 1000)}s) for room ${roomCode}. Force-finishing match.`
+      );
       this.forceFinishHangingRoom(roomCode);
-    }, 120000);
+    }, guardrailMs);
     this.guardrailTimers.set(roomCode, guardrail);
 
     // Check if all grading is already complete
