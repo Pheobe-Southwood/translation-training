@@ -40,6 +40,8 @@ export interface SpectatorState {
   playerId: string;
   nickname: string;
   isOnline?: boolean;
+  /** Seat created from a shareable read-only spectate link (no account behind it). */
+  isAnonymous?: boolean;
   joinedAt: number;
 }
 
@@ -84,6 +86,12 @@ export interface PvpRoomState {
   status: RoomStatus;
   maxPlayers: number; // 2, 3, 4
   allowSpectators?: boolean;
+  /**
+   * Signed, expiring credential for the shareable read-only spectate link
+   * (`/#/pvp/<CODE>?spectate=1&t=<ticket>`). Possession of the ticket grants
+   * "watch this room" and nothing else, so watching needs no account.
+   */
+  spectateTicket?: string;
   createdAt?: number;
   startedAt?: number;
   countdownEndTime?: number;

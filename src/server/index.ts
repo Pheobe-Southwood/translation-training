@@ -12,6 +12,7 @@ import {
   verifyInvitationCode,
   generateUserToken,
   verifyUserToken,
+  verifySpectateTicket,
 } from './auth.js';
 import { db } from './db.js';
 import { getExamByYear, getExamYears, getRandomExam } from './examService.js';
@@ -314,14 +315,50 @@ async function main() {
   });
 
   // --- WebSocket Route for PVP ---
+  //
+  // Two ways in, with strictly different powers:
+  //  - `?ticket=<spectateTicket>&playerId=spec_...&nickname=...` : read-only viewer.
+  //    The ticket proves possession of the shareable spectate link, so watching
+  //    needs no account and can never touch a player seat.
+  //  - `?token=<userToken>&playerId=<userId>` : player-capable connection. The
+  //    playerId must match the token owner, so nobody can hijack another seat.
   app.get('/ws', { websocket: true }, (socket, req) => {
     const url = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
     const token = url.searchParams.get('token');
+    const ticket = url.searchParams.get('ticket');
     const playerId = url.searchParams.get('playerId');
+    const nickname = url.searchParams.get('nickname') || undefined;
+
+    if (ticket) {
+      const verifiedTicket = verifySpectateTicket(ticket);
+      if (!verifiedTicket) {
+        socket.close(4003, 'Spectate link invalid or expired');
+        return;
+      }
+      if (!playerId || !playerId.startsWith('spec_')) {
+        socket.close(4003, 'Spectator identity required');
+        return;
+      }
+
+      const result = pvpManager.registerSpectatorSeat(
+        playerId,
+        verifiedTicket.roomCode,
+        nickname,
+        socket as any
+      );
+      if (!result.ok) {
+        socket.close(result.reason === 'ROOM_NOT_FOUND' ? 4005 : 4004, result.reason);
+      }
+      return;
+    }
 
     const verified = verifyUserToken(token || undefined);
     if (!verified || !playerId) {
       socket.close(4001, 'Unauthorized token or missing playerId');
+      return;
+    }
+    if (playerId !== verified.userId) {
+      socket.close(4002, 'playerId does not match the authenticated token');
       return;
     }
 
@@ -332,6 +369,10 @@ async function main() {
   app.get('/api/health', async () => {
     return { status: 'ok', timestamp: Date.now() };
   });
+
+  console.log(
+    `[DeepSeek] thinking=enabled reasoning_effort=${CONFIG.deepseekReasoningEffort} model=deepseek-flash`
+  );
 
   try {
     await app.listen({ port: CONFIG.port, host: CONFIG.host });

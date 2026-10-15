@@ -8,9 +8,30 @@ const STORAGE_KEYS = {
   THEME: 'tt_theme',
   ACTIVE_PVP_ROOM: 'tt_active_pvp_room',
   PVP_DRAFT: 'tt_pvp_draft',
+  SPECTATOR_ID: 'tt_spec_id',
 };
 
 export type AppTheme = 'light' | 'dark';
+
+/**
+ * Per-tab identity for read-only link spectators.
+ *
+ * Watching a match must work without an account, and a viewer must never share an
+ * identity with a playing account (two tabs of the same account used to fight over
+ * one socket and could reset the opponent's view). Living in sessionStorage keeps
+ * the seat stable across a refresh of the same tab while staying unique per tab.
+ */
+export function getSpectatorId(): string {
+  try {
+    const existing = sessionStorage.getItem(STORAGE_KEYS.SPECTATOR_ID);
+    if (existing && /^spec_[a-z0-9]{6,}$/.test(existing)) return existing;
+    const minted = `spec_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`;
+    sessionStorage.setItem(STORAGE_KEYS.SPECTATOR_ID, minted);
+    return minted;
+  } catch {
+    return `spec_${Math.random().toString(36).slice(2, 14)}`;
+  }
+}
 
 /**
  * Room code of the match the player is currently in. Persisted so a page refresh

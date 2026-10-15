@@ -103,7 +103,10 @@ async function run() {
 
     await new Promise<void>((resolve, reject) => {
       hostWs.on('open', () => {
-        console.log('Host reconnected socket, sending ping & waiting for state...');
+        console.log('Host reconnected socket, re-binding its room explicitly...');
+        // The real client always re-binds after a reload/app switch; the server
+        // deliberately does not guess a room from the playerId anymore.
+        hostWs!.send(JSON.stringify({ type: 'room:reconnect', payload: { roomCode } }));
       });
       hostWs.on('message', (data) => {
         const msg = JSON.parse(data.toString());

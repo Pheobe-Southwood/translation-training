@@ -215,19 +215,26 @@ async function run() {
     );
     assert(t5.payload.players[guestId].currentSegmentIndex === 1, 'index did not jump on duplicate submit');
 
-    // --- T2: stale socket close must not unregister the live socket --------
-    console.log('\n--- T2: late close from a replaced socket is ignored ---');
+    // --- T2: one tab closing must not unregister another live tab ----------
+    console.log('\n--- T2: late close from a second tab does not disturb the live socket ---');
     hostWs2 = await connect(hostId);
-    await wait(
-      300
-    ); // let the server register the replacement socket (it also auto-broadcasts state)
+    // The real client re-binds its room on every (re)connect; the server no longer
+    // guesses a room from the playerId alone.
+    await waitForMessage(
+      hostWs2,
+      (m) => isRoomState(m) && m.payload?.roomCode === roomCode,
+      'second tab rebinds the room',
+      6000,
+      () => hostWs2!.send(JSON.stringify({ type: 'room:reconnect', payload: { roomCode } }))
+    );
+    await wait(200);
     closeSocket(hostWs);
     hostWs = undefined;
-    await wait(500); // give the server time to process the stale close event
+    await wait(500); // give the server time to process the closed tab
     const t2 = await waitForMessage(
       hostWs2,
       (m) => isRoomState(m) && !!m.payload?.players?.[guestId]?.submissions?.[1],
-      'broadcast on the replacement socket',
+      'broadcast on the surviving socket',
       6000,
       () =>
         guestWs!.send(
@@ -236,11 +243,15 @@ async function run() {
     );
     assert(
       t2.payload.players[guestId].currentSegmentIndex === 2,
-      'replacement socket still receives authoritative broadcasts after the old socket closed'
+      'surviving socket still receives authoritative broadcasts after the other tab closed'
     );
     assert(
-      serverLog.some((l) => l.includes('Ignoring close event from stale socket')),
-      'server ignored the stale close event'
+      t2.payload.players[hostId]?.isOnline !== false,
+      'host was NOT marked offline while another tab was still connected'
+    );
+    assert(
+      serverLog.some((l) => l.includes('still has live sockets, no offline marking')),
+      'server kept the identity online because a live socket remained'
     );
 
     // --- T3: reconnect preserves progress ---------------------------------
@@ -250,7 +261,8 @@ async function run() {
       guestWs2,
       (m) => isRoomState(m) && !!m.payload?.players?.[guestId],
       'reconnect state',
-      6000
+      6000,
+      () => guestWs2!.send(JSON.stringify({ type: 'room:reconnect', payload: { roomCode } }))
     );
     const recovered = t3.payload.players[guestId];
     assert(recovered.currentSegmentIndex === 2, 'currentSegmentIndex preserved (2) on reconnect');

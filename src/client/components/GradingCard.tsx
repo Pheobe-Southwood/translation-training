@@ -12,6 +12,7 @@ interface GradingCardProps {
 export const GradingCard: React.FC<GradingCardProps> = ({
   result,
   studentAnswer,
+  originalText,
   segmentIndex,
 }) => {
   return (
@@ -52,6 +53,28 @@ export const GradingCard: React.FC<GradingCardProps> = ({
           )}
         </div>
       )}
+
+      {/* Question and reference translation: the standard answer sits directly under
+          the sentence so a reviewer can fix their own version line by line. */}
+      <div className="space-y-2">
+        {originalText && (
+          <div className="p-3 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700 font-serif text-sm leading-relaxed text-zinc-900 dark:text-zinc-100">
+            <div className="font-mono text-[10px] text-zinc-500 dark:text-zinc-400 uppercase font-bold mb-1">
+              原文长难句
+            </div>
+            {originalText}
+          </div>
+        )}
+
+        <div className="p-3 bg-rose-50/70 dark:bg-rose-950/40 border-2 border-rose-300 dark:border-rose-900/70">
+          <div className="font-mono text-[10px] text-swiss-red dark:text-rose-400 uppercase font-bold mb-1 flex items-center gap-1">
+            <Quote className="w-3 h-3" /> 官方标准参考译文
+          </div>
+          <div className="text-sm text-zinc-900 dark:text-zinc-100 font-medium leading-relaxed">
+            {result.reference_translation || '（本题暂无参考译文）'}
+          </div>
+        </div>
+      </div>
 
       {/* Scoring Points Breakdown */}
       <div>
@@ -96,7 +119,7 @@ export const GradingCard: React.FC<GradingCardProps> = ({
         </div>
       </div>
 
-      {/* Student vs Reference Translation */}
+      {/* Student's own translation */}
       <div className="space-y-3 pt-2">
         <div className="p-3 bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200 dark:border-zinc-700">
           <div className="font-mono text-[10px] text-zinc-500 dark:text-zinc-400 uppercase font-bold mb-1">
@@ -104,15 +127,6 @@ export const GradingCard: React.FC<GradingCardProps> = ({
           </div>
           <div className="text-xs text-swiss-black dark:text-zinc-100 font-medium leading-relaxed">
             {studentAnswer || '（未作答）'}
-          </div>
-        </div>
-
-        <div className="p-3 bg-rose-50/50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900/60">
-          <div className="font-mono text-[10px] text-swiss-red dark:text-rose-400 uppercase font-bold mb-1 flex items-center gap-1">
-            <Quote className="w-3 h-3" /> 官方标准参考译文
-          </div>
-          <div className="text-xs text-zinc-900 dark:text-zinc-100 font-medium leading-relaxed">
-            {result.reference_translation}
           </div>
         </div>
       </div>

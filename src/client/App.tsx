@@ -14,6 +14,7 @@ import {
   setStoredUser,
   getPlayerNickname,
   setPlayerNickname,
+  getSpectatorId,
   getStoredTheme,
   setStoredTheme,
   clearActivePvpRoom,
@@ -21,6 +22,33 @@ import {
   type AppTheme,
 } from './utils/storage.js';
 import type { PvpSocket } from './utils/pvpSocket.js';
+
+interface SpectateRoute {
+  roomCode: string;
+  ticket?: string;
+}
+
+/**
+ * Parse `#/pvp/<CODE>[?spectate=1&t=<ticket>]`.
+ *
+ * The query lives inside the hash fragment, so it never reaches the server (and
+ * therefore never lands in an access log) while still being shareable as one link.
+ */
+function parsePvpRoute(hash: string): { roomCode: string; spectate: boolean; ticket?: string } | null {
+  const raw = hash.startsWith('#') ? hash.slice(1) : hash;
+  const [pathPart, queryPart = ''] = raw.split('?');
+  const match = pathPart.match(/^\/pvp\/([A-Za-z0-9]+)/);
+  if (!match || !match[1]) return null;
+
+  const params = new URLSearchParams(queryPart);
+  const spectateRaw = params.get('spectate');
+  const spectate = spectateRaw === '1' || spectateRaw === 'true';
+  return {
+    roomCode: match[1].toUpperCase(),
+    spectate,
+    ticket: params.get('t') || undefined,
+  };
+}
 
 export const App: React.FC = () => {
   const [theme, setTheme] = useState<AppTheme>(() => getStoredTheme());
@@ -30,8 +58,14 @@ export const App: React.FC = () => {
   const [selectedYear, setSelectedYear] = useState<number>(2024);
   const [nickname, setNickname] = useState<string>(() => getPlayerNickname());
 
+  // Read-only spectate session (shareable link): no account required, and the
+  // viewer gets a per-tab identity so watching can never collide with a player seat.
+  const [spectateRoute, setSpectateRoute] = useState<SpectateRoute | null>(null);
+  const spectatorId = useState<string>(() => getSpectatorId())[0];
+  const isSpectateMode = spectateRoute !== null;
+
   // Player ID is tied to authenticated user ID for 100% online persistence
-  const playerId = currentUser?.id || 'guest';
+  const playerId = isSpectateMode ? spectatorId : currentUser?.id || '';
 
   // PVP Active State
   const [pvpState, setPvpState] = useState<{
@@ -53,7 +87,7 @@ export const App: React.FC = () => {
   // Resume a match that was interrupted by a refresh / app switch. The room code is
   // persisted when a match starts and cleared when it truly ends.
   useEffect(() => {
-    if (isAuthenticated !== true || currentView !== 'home') return;
+    if (isAuthenticated !== true || currentView !== 'home' || isSpectateMode) return;
     if (window.location.hash.match(/#\/pvp\/[A-Za-z0-9]+/)) return;
     const activeRoom = getActivePvpRoom();
     if (!activeRoom) return;
@@ -67,14 +101,13 @@ export const App: React.FC = () => {
   }, [isAuthenticated]);
 
   const parseHashRoute = () => {
-    const hash = window.location.hash;
-    const match = hash.match(/#\/pvp\/([A-Za-z0-9]+)/);
-    if (match && match[1]) {
-      setInitialRoomCode(match[1].toUpperCase());
-      setInitialSpectate(hash.includes('spectate=1') || hash.includes('spectate=true'));
-      setAutoJoinRoom(false);
-      setCurrentView('pvp-lobby');
-    }
+    const route = parsePvpRoute(window.location.hash);
+    if (!route) return;
+    setInitialRoomCode(route.roomCode);
+    setInitialSpectate(route.spectate);
+    setSpectateRoute(route.spectate ? { roomCode: route.roomCode, ticket: route.ticket } : null);
+    setAutoJoinRoom(false);
+    setCurrentView('pvp-lobby');
   };
 
   const checkAuth = async () => {
@@ -197,7 +230,8 @@ export const App: React.FC = () => {
 
   return (
     <div className="min-h-screen flex flex-col bg-swiss-paper dark:bg-swiss-paper-dark text-swiss-black dark:text-zinc-100 font-sans swiss-grid-bg transition-colors duration-150">
-      {!isAuthenticated && (
+      {/* Spectate links are public by design: watching never asks for an account. */}
+      {!isAuthenticated && !isSpectateMode && (
         <PasswordGate onSuccess={handleAuthSuccess} />
       )}
 
@@ -205,12 +239,13 @@ export const App: React.FC = () => {
         <SwissHeader
           currentView={currentView}
           onNavigate={(view) => setCurrentView(view)}
-          nickname={nickname}
+          nickname={isSpectateMode ? '观众' : nickname}
           username={currentUser?.username}
           onChangeNickname={handleChangeNickname}
           onLogout={handleLogout}
           theme={theme}
           onToggleTheme={handleToggleTheme}
+          spectatorMode={isSpectateMode}
         />
       )}
 
@@ -231,9 +266,11 @@ export const App: React.FC = () => {
           <PvpLobbyView
             initialYear={selectedYear}
             playerId={playerId}
-            nickname={nickname}
+            nickname={isSpectateMode ? getPlayerNickname() : nickname}
             initialRoomCode={initialRoomCode}
             initialSpectate={initialSpectate}
+            spectateTicket={spectateRoute?.ticket}
+            isAuthenticated={isAuthenticated === true}
             autoJoin={autoJoinRoom}
             onBack={() => setCurrentView('home')}
             onStartMatch={handleStartMatch}

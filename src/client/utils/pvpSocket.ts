@@ -16,11 +16,31 @@ export interface PvpStatusDetail {
   message?: string;
 }
 
+export interface PvpSocketOptions {
+  /**
+   * Signed read-only spectate ticket. When present the socket connects with
+   * `?ticket=...` instead of a user token, which is what makes "click the link and
+   * watch" work without an account.
+   */
+  ticket?: string;
+  /** Nickname of the viewer, shown in the room's spectator gallery. */
+  nickname?: string;
+}
+
 type MessageHandler = (msg: PvpServerMessage) => void;
 type StatusHandler = (status: PvpConnectionStatus, detail: PvpStatusDetail) => void;
 
 const HEARTBEAT_INTERVAL_MS = 20000;
 const BACKOFF_MS = [500, 1000, 2000, 4000, 5000];
+
+/** WebSocket close codes the server uses for terminal authentication problems. */
+const CLOSE_MESSAGES: Record<number, string> = {
+  4001: '登录已过期，请重新登录',
+  4002: '登录身份与对战席位不匹配，请刷新页面后重试',
+  4003: '观战链接无效或已过期，请让房主重新复制观战链接',
+  4004: '该房间已关闭实时观战',
+  4005: '对战已结束或房间已失效',
+};
 
 /**
  * Owns the PVP websocket for a whole match session (lobby -> live match -> recap).
@@ -34,13 +54,21 @@ const BACKOFF_MS = [500, 1000, 2000, 4000, 5000];
  * This class adds:
  *  - heartbeat ping for the entire session (not just the lobby)
  *  - automatic reconnect with backoff, plus instant retry on visibilitychange/online
- *  - `room:reconnect` on every (re)connect so the server re-associates the player and
- *    pushes authoritative state (current segment, submissions) back
+ *  - `room:reconnect` on every (re)connect **of an already joined session**, so the
+ *    server re-associates the connection and pushes authoritative state back. It is
+ *    deliberately NOT sent before the first successful join: doing so raced the
+ *    explicit `room:join`, and the resulting "room not found" reply was treated as
+ *    fatal, which dropped the join and left spectators unable to watch anything.
  *  - `send()` that reports failure instead of silently discarding
  *  - explicit terminal states (expired token / room gone) so the UI can stop retrying
+ *  - read-only spectate mode: with a ticket the socket never needs an account, and
+ *    the server rejects every player action coming from it.
  */
 export class PvpSocket {
   private readonly playerId: string;
+  private readonly ticket?: string;
+  private readonly nickname?: string;
+  private readonly spectatorOnly: boolean;
   private ws: WebSocket | null = null;
   private roomCode?: string;
   private status: PvpConnectionStatus = 'idle';
@@ -52,12 +80,17 @@ export class PvpSocket {
   private reactivateBound = false;
   private lastRoomState: PvpRoomState | null = null;
   private pendingSends: string[] = [];
+  /** True once an authoritative room:state for `roomCode` has been received. */
+  private joined = false;
 
   private readonly messageHandlers = new Set<MessageHandler>();
   private readonly statusHandlers = new Set<StatusHandler>();
 
-  constructor(playerId: string) {
+  constructor(playerId: string, options: PvpSocketOptions = {}) {
     this.playerId = playerId;
+    this.ticket = options.ticket;
+    this.nickname = options.nickname;
+    this.spectatorOnly = !!options.ticket;
   }
 
   // --- Subscriptions -------------------------------------------------------
@@ -118,8 +151,20 @@ export class PvpSocket {
     return !!this.ws && this.ws.readyState === WebSocket.OPEN;
   }
 
+  /** True for ticket viewers: read-only, no account behind the connection. */
+  public isSpectatorOnly(): boolean {
+    return this.spectatorOnly;
+  }
+
   public setRoomCode(roomCode?: string): void {
-    this.roomCode = roomCode ? roomCode.toUpperCase().trim() : undefined;
+    const next = roomCode ? roomCode.toUpperCase().trim() : undefined;
+    if (next !== this.roomCode) {
+      // A different room means a different session: an old "joined" flag must not
+      // make the next connect() claim a membership it does not have.
+      this.joined = false;
+      this.lastRoomState = null;
+    }
+    this.roomCode = next;
   }
 
   // --- Lifecycle -----------------------------------------------------------
@@ -183,25 +228,38 @@ export class PvpSocket {
 
   // --- Internals -----------------------------------------------------------
 
+  private buildSocketUrl(): string | null {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.host;
+
+    if (this.ticket) {
+      const nicknameParam = this.nickname ? `&nickname=${encodeURIComponent(this.nickname)}` : '';
+      return `${protocol}//${host}/ws?ticket=${encodeURIComponent(this.ticket)}&playerId=${encodeURIComponent(
+        this.playerId
+      )}${nicknameParam}`;
+    }
+
+    const token = getAuthToken();
+    if (!token) return null;
+    return `${protocol}//${host}/ws?token=${encodeURIComponent(token)}&playerId=${encodeURIComponent(
+      this.playerId
+    )}`;
+  }
+
   private openSocket(): void {
     if (this.manuallyClosed || this.status === 'fatal') return;
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
 
-    const token = getAuthToken();
-    if (!token) {
+    const url = this.buildSocketUrl();
+    if (!url) {
       this.statusMessage = '登录已过期，请重新登录';
       this.setStatus('fatal');
       return;
     }
 
     this.setStatus(this.reconnectAttempt > 0 ? 'reconnecting' : 'connecting');
-
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}&playerId=${encodeURIComponent(
-      this.playerId
-    )}`;
 
     let socket: WebSocket;
     try {
@@ -219,7 +277,9 @@ export class PvpSocket {
       this.statusMessage = undefined;
       this.setStatus('open');
       this.startHeartbeat();
-      if (this.roomCode) {
+      // Only re-bind a session that actually existed. Probing before the first
+      // join produced a spurious ROOM_NOT_FOUND that used to abort the join.
+      if (this.roomCode && this.joined) {
         console.log(`[PVP] (Re)connected, requesting authoritative room state for ${this.roomCode}`);
         socket.send(JSON.stringify({ type: 'room:reconnect', payload: { roomCode: this.roomCode } }));
       }
@@ -235,7 +295,18 @@ export class PvpSocket {
       }
 
       if (msg?.type === 'room:state' && msg.payload) {
-        this.lastRoomState = msg.payload as PvpRoomState;
+        const state = msg.payload as PvpRoomState;
+        if (!this.roomCode || state.roomCode === this.roomCode) {
+          if (!this.roomCode) this.roomCode = state.roomCode;
+          this.lastRoomState = state;
+          this.joined = true;
+          this.statusMessage = undefined;
+        } else {
+          // A state frame for a room this view is not bound to must never reach the
+          // UI: it used to overwrite the live match with an abandoned lobby.
+          console.warn(`[PVP] Ignoring room:state for foreign room ${state.roomCode} (bound to ${this.roomCode})`);
+          return;
+        }
       }
 
       if (msg?.type === 'error' && msg.payload?.code === 'ROOM_NOT_FOUND') {
@@ -244,7 +315,8 @@ export class PvpSocket {
 
       this.emit(msg);
 
-      if (this.statusMessage && msg?.type === 'error' && msg.payload?.code === 'ROOM_NOT_FOUND') {
+      if (msg?.type === 'error' && msg.payload?.code === 'ROOM_NOT_FOUND' && this.joined) {
+        // We were in this room and it is gone (match swept / server restarted).
         this.stopReconnectTimer();
         this.setStatus('fatal');
       }
@@ -262,8 +334,10 @@ export class PvpSocket {
         this.setStatus('closed');
         return;
       }
-      if (event?.code === 4001) {
-        this.statusMessage = '登录已过期，请重新登录';
+
+      const terminalMessage = event?.code ? CLOSE_MESSAGES[event.code] : undefined;
+      if (terminalMessage) {
+        this.statusMessage = terminalMessage;
         this.setStatus('fatal');
         return;
       }

@@ -1,5 +1,5 @@
 import React from 'react';
-import { History, LogOut, Swords, User, Sun, Moon } from 'lucide-react';
+import { History, LogOut, Swords, User, Sun, Moon, Eye } from 'lucide-react';
 
 interface SwissHeaderProps {
   currentView: string;
@@ -10,6 +10,8 @@ interface SwissHeaderProps {
   onLogout: () => void;
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
+  /** Read-only link spectator: account controls are hidden (there may be no account). */
+  spectatorMode?: boolean;
 }
 
 export const SwissHeader: React.FC<SwissHeaderProps> = ({
@@ -21,6 +23,7 @@ export const SwissHeader: React.FC<SwissHeaderProps> = ({
   onLogout,
   theme,
   onToggleTheme,
+  spectatorMode = false,
 }) => {
   return (
     <header className="border-b-2 border-swiss-black dark:border-zinc-800 bg-white dark:bg-zinc-900/95 backdrop-blur-sm sticky top-0 z-40 transition-colors duration-150">
@@ -45,38 +48,47 @@ export const SwissHeader: React.FC<SwissHeaderProps> = ({
 
         {/* Center navigation hints (Desktop) */}
         <div className="hidden md:flex items-center gap-4 lg:gap-6 font-mono text-xs uppercase font-semibold">
-          <button
-            onClick={() => onNavigate('home')}
-            className={`px-3 py-1.5 border transition-all ${
-              currentView === 'home'
-                ? 'bg-swiss-black dark:bg-zinc-100 text-white dark:text-swiss-black border-swiss-black dark:border-zinc-100'
-                : 'border-transparent hover:border-swiss-black dark:hover:border-zinc-700 text-swiss-black dark:text-zinc-300'
-            }`}
-          >
-            首页导航
-          </button>
-          <button
-            onClick={() => onNavigate('pvp-lobby')}
-            className={`px-3 py-1.5 border flex items-center gap-1.5 transition-all ${
-              currentView === 'pvp-lobby' || currentView === 'pvp-match'
-                ? 'bg-swiss-red text-white border-swiss-red'
-                : 'border-transparent hover:border-swiss-black dark:hover:border-zinc-700 text-swiss-black dark:text-zinc-300'
-            }`}
-          >
-            <Swords className="w-3.5 h-3.5" />
-            PVP 对战
-          </button>
-          <button
-            onClick={() => onNavigate('history')}
-            className={`px-3 py-1.5 border flex items-center gap-1.5 transition-all ${
-              currentView === 'history'
-                ? 'bg-swiss-black dark:bg-zinc-100 text-white dark:text-swiss-black border-swiss-black dark:border-zinc-100'
-                : 'border-transparent hover:border-swiss-black dark:hover:border-zinc-700 text-swiss-black dark:text-zinc-300'
-            }`}
-          >
-            <History className="w-3.5 h-3.5" />
-            练习档案
-          </button>
+          {spectatorMode ? (
+            <span className="px-3 py-1.5 border border-blue-600 bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 flex items-center gap-1.5 font-bold">
+              <Eye className="w-3.5 h-3.5" />
+              实时观战模式（免登录只读）
+            </span>
+          ) : (
+            <>
+              <button
+                onClick={() => onNavigate('home')}
+                className={`px-3 py-1.5 border transition-all ${
+                  currentView === 'home'
+                    ? 'bg-swiss-black dark:bg-zinc-100 text-white dark:text-swiss-black border-swiss-black dark:border-zinc-100'
+                    : 'border-transparent hover:border-swiss-black dark:hover:border-zinc-700 text-swiss-black dark:text-zinc-300'
+                }`}
+              >
+                首页导航
+              </button>
+              <button
+                onClick={() => onNavigate('pvp-lobby')}
+                className={`px-3 py-1.5 border flex items-center gap-1.5 transition-all ${
+                  currentView === 'pvp-lobby' || currentView === 'pvp-match'
+                    ? 'bg-swiss-red text-white border-swiss-red'
+                    : 'border-transparent hover:border-swiss-black dark:hover:border-zinc-700 text-swiss-black dark:text-zinc-300'
+                }`}
+              >
+                <Swords className="w-3.5 h-3.5" />
+                PVP 对战
+              </button>
+              <button
+                onClick={() => onNavigate('history')}
+                className={`px-3 py-1.5 border flex items-center gap-1.5 transition-all ${
+                  currentView === 'history'
+                    ? 'bg-swiss-black dark:bg-zinc-100 text-white dark:text-swiss-black border-swiss-black dark:border-zinc-100'
+                    : 'border-transparent hover:border-swiss-black dark:hover:border-zinc-700 text-swiss-black dark:text-zinc-300'
+                }`}
+              >
+                <History className="w-3.5 h-3.5" />
+                练习档案
+              </button>
+            </>
+          )}
         </div>
 
         {/* Right Action Bar */}
@@ -99,38 +111,44 @@ export const SwissHeader: React.FC<SwissHeaderProps> = ({
           </button>
 
           {/* User Nickname Button */}
-          <button
-            onClick={onChangeNickname}
-            title={username ? `账号: @${username} (点击修改昵称)` : '修改昵称'}
-            className="flex items-center gap-1 sm:gap-1.5 px-2 py-1.5 border border-zinc-300 dark:border-zinc-700 hover:border-swiss-black dark:hover:border-zinc-500 transition-colors bg-zinc-50 dark:bg-zinc-800 text-swiss-black dark:text-zinc-200"
-          >
-            <User className="w-3.5 h-3.5 text-swiss-subtle dark:text-zinc-400 shrink-0" />
-            <span className="font-bold max-w-[65px] xs:max-w-[85px] sm:max-w-[110px] truncate text-[11px] sm:text-xs">
-              {nickname}
-            </span>
-          </button>
+          {!spectatorMode && (
+            <button
+              onClick={onChangeNickname}
+              title={username ? `账号: @${username} (点击修改昵称)` : '修改昵称'}
+              className="flex items-center gap-1 sm:gap-1.5 px-2 py-1.5 border border-zinc-300 dark:border-zinc-700 hover:border-swiss-black dark:hover:border-zinc-500 transition-colors bg-zinc-50 dark:bg-zinc-800 text-swiss-black dark:text-zinc-200"
+            >
+              <User className="w-3.5 h-3.5 text-swiss-subtle dark:text-zinc-400 shrink-0" />
+              <span className="font-bold max-w-[65px] xs:max-w-[85px] sm:max-w-[110px] truncate text-[11px] sm:text-xs">
+                {nickname}
+              </span>
+            </button>
+          )}
 
           {/* Mobile History shortcut */}
-          <button
-            onClick={() => onNavigate('history')}
-            title="历史记录"
-            className={`p-1.5 border transition-colors md:hidden ${
-              currentView === 'history'
-                ? 'bg-swiss-black text-white border-swiss-black dark:bg-zinc-200 dark:text-black dark:border-zinc-200'
-                : 'border-zinc-300 dark:border-zinc-700 hover:border-swiss-black dark:hover:border-zinc-500 bg-zinc-50 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300'
-            }`}
-          >
-            <History className="w-3.5 h-3.5" />
-          </button>
+          {!spectatorMode && (
+            <button
+              onClick={() => onNavigate('history')}
+              title="历史记录"
+              className={`p-1.5 border transition-colors md:hidden ${
+                currentView === 'history'
+                  ? 'bg-swiss-black text-white border-swiss-black dark:bg-zinc-200 dark:text-black dark:border-zinc-200'
+                  : 'border-zinc-300 dark:border-zinc-700 hover:border-swiss-black dark:hover:border-zinc-500 bg-zinc-50 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300'
+              }`}
+            >
+              <History className="w-3.5 h-3.5" />
+            </button>
+          )}
 
           {/* Logout Button */}
-          <button
-            onClick={onLogout}
-            title="退出登录"
-            className="p-1.5 border border-zinc-300 dark:border-zinc-700 hover:border-swiss-red dark:hover:border-swiss-red hover:text-swiss-red dark:hover:text-swiss-red transition-colors bg-zinc-50 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-          </button>
+          {!spectatorMode && (
+            <button
+              onClick={onLogout}
+              title="退出登录"
+              className="p-1.5 border border-zinc-300 dark:border-zinc-700 hover:border-swiss-red dark:hover:border-swiss-red hover:text-swiss-red dark:hover:text-swiss-red transition-colors bg-zinc-50 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       </div>
     </header>

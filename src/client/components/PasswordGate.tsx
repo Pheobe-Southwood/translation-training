@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Lock, ArrowRight, ShieldCheck, User, KeyRound, Sparkles, AlertCircle } from 'lucide-react';
+import { Lock, ArrowRight, ShieldCheck, User, KeyRound, Sparkles } from 'lucide-react';
 import type { AuthUser } from '../../shared/types.js';
 import { setAuthToken, setStoredUser } from '../utils/storage.js';
 
