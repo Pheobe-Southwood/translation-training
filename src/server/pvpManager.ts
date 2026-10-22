@@ -8,11 +8,12 @@ import type {
   SegmentSubmission,
   HistorySessionRecord,
 } from '../shared/types.js';
-import { getExamByYear, getRandomExam } from './examService.js';
+import { getExamByYear, getGradingMaterial, getRandomExam } from './examService.js';
 import { gradeTranslation, gradePvpPairTranslation } from './deepseek.js';
 import { generateSpectateTicket } from './auth.js';
 import { CONFIG } from './config.js';
 import { db } from './db.js';
+import { DEFAULT_DIRECTION, parseDirection } from '../shared/direction.js';
 
 /**
  * A single live websocket.
@@ -372,6 +373,7 @@ class PvpManager {
       durationMinutes?: number;
       maxPlayers?: number;
       allowSpectators?: boolean;
+      direction?: string;
     }
   ) {
     const playerId = client.playerId;
@@ -400,13 +402,19 @@ class PvpManager {
       ? (payload.maxPlayers as number)
       : 2;
     const allowSpectators = payload.allowSpectators !== false;
+    const direction = payload.direction === undefined
+      ? DEFAULT_DIRECTION
+      : parseDirection(payload.direction);
+    if (!direction) {
+      return this.sendError(client, '无效的翻译方向，仅支持 en-zh 或 zh-en', 'INVALID_DIRECTION');
+    }
 
     let exam: TranslationExam | undefined;
     if (payload.year) {
-      exam = getExamByYear(payload.year);
+      exam = getExamByYear(payload.year, direction);
     }
     if (!exam) {
-      exam = getRandomExam();
+      exam = getRandomExam(direction);
     }
 
     const hostPlayer: PlayerState = {
@@ -425,6 +433,7 @@ class PvpManager {
     const roomState: PvpRoomState = {
       roomCode: code,
       year: exam.year,
+      direction,
       exam,
       durationMinutes: duration,
       status: 'WAITING',
@@ -448,7 +457,7 @@ class PvpManager {
     this.detachFromOtherRooms(playerId, code, { asPlayer: true });
 
     console.log(
-      `[PVP] Created room ${code} (maxPlayers=${maxPlayers}, spectators=${allowSpectators}) by ${hostPlayer.nickname} (${playerId}), Year: ${exam.year}`
+      `[PVP] Created room ${code} (maxPlayers=${maxPlayers}, spectators=${allowSpectators}, direction=${direction}) by ${hostPlayer.nickname} (${playerId}), Year: ${exam.year}`
     );
     this.broadcastRoomState(code);
   }
@@ -711,6 +720,7 @@ class PvpManager {
       durationMinutes?: number;
       maxPlayers?: number;
       allowSpectators?: boolean;
+      direction?: string;
     }
   ) {
     if (client.spectatorOnly) {
@@ -724,12 +734,34 @@ class PvpManager {
       return this.sendError(client, '只有房主可以更改房间设置');
     }
 
-    if (payload.year) {
-      const exam = getExamByYear(payload.year);
-      if (exam) {
-        room.year = exam.year;
-        room.exam = exam;
+    let examChanged = false;
+    let nextDirection = room.direction;
+
+    if (payload.direction !== undefined) {
+      const parsed = parseDirection(payload.direction);
+      if (!parsed) {
+        return this.sendError(client, '无效的翻译方向，仅支持 en-zh 或 zh-en', 'INVALID_DIRECTION');
       }
+      nextDirection = parsed;
+    }
+
+    if (payload.year || nextDirection !== room.direction) {
+      const targetYear = payload.year || room.year;
+      const exam = getExamByYear(targetYear, nextDirection);
+      if (!exam) {
+        return this.sendError(client, '该年份暂无对应方向的题库，请换一套', 'EXAM_NOT_FOUND');
+      }
+      examChanged = exam.year !== room.year || nextDirection !== room.direction;
+      room.year = exam.year;
+      room.direction = nextDirection;
+      room.exam = exam;
+    }
+
+    if (examChanged) {
+      // A different paper/direction invalidates every "ready" state; otherwise a
+      // room could start instantly on a paper nobody has seen.
+      for (const p of Object.values(room.players)) p.isReady = false;
+      room.status = 'WAITING';
     }
 
     if (payload.durationMinutes && [10, 15, 20].includes(payload.durationMinutes)) {
@@ -957,7 +989,8 @@ class PvpManager {
         distortion_deduction: 0,
         fluency_deduction: 0,
         critique: '该题超时未作答，得 0 分。',
-        reference_translation: '',
+        reference_translation:
+          getGradingMaterial(room.year, room.direction, idx)?.referenceAnswer || '',
         gradedAt: Date.now(),
       },
     };
@@ -1029,7 +1062,10 @@ class PvpManager {
       return;
     }
 
-    const originalText = room.exam.translationSegments[segmentIdx] || '';
+    const originalText =
+      getGradingMaterial(room.year, room.direction, segmentIdx)?.sourceText ||
+      room.exam.translationSegments[segmentIdx] ||
+      '';
 
     player.lastActiveAt = Date.now();
     player.submissions[segmentIdx] = {
@@ -1081,15 +1117,18 @@ class PvpManager {
     sub.gradingStatus = 'grading';
     this.broadcastRoomState(room.roomCode);
 
-    const targetSentence = room.exam.translationSegments[segmentIdx];
+    const material = getGradingMaterial(room.year, room.direction, segmentIdx);
+    const targetSentence = material?.sourceText || room.exam.translationSegments[segmentIdx];
     console.log(
-      `[PVP Individual] Grading Segment ${segmentIdx + 1} for ${player.nickname} (${player.playerId}) in Room ${room.roomCode}`
+      `[PVP Individual] Grading Segment ${segmentIdx + 1} for ${player.nickname} (${player.playerId}) in Room ${room.roomCode} (${room.direction})`
     );
 
     gradeTranslation({
-      fullArticle: room.exam.contentMarkdown,
+      fullArticle: material?.fullSource || room.exam.contentMarkdown,
       targetSentence,
       studentAnswer: sub.studentAnswer,
+      direction: room.direction,
+      referenceAnswer: material?.referenceAnswer,
     })
       .then((result) => {
         sub.gradingStatus = 'graded';
@@ -1145,16 +1184,21 @@ class PvpManager {
     subB.gradingStatus = 'grading';
     this.broadcastRoomState(room.roomCode);
 
-    const targetSentence = room.exam.translationSegments[segmentIdx];
-    console.log(`[PVP Pair] Triggering paired grading for Room ${room.roomCode}, Segment ${segmentIdx + 1}`);
+    const material = getGradingMaterial(room.year, room.direction, segmentIdx);
+    const targetSentence = material?.sourceText || room.exam.translationSegments[segmentIdx];
+    console.log(
+      `[PVP Pair] Triggering paired grading for Room ${room.roomCode}, Segment ${segmentIdx + 1} (${room.direction})`
+    );
 
     gradePvpPairTranslation({
-      fullArticle: room.exam.contentMarkdown,
+      fullArticle: material?.fullSource || room.exam.contentMarkdown,
       targetSentence,
       studentAAnswer: subA.studentAnswer,
       studentBAnswer: subB.studentAnswer,
       studentAName: playerA.nickname,
       studentBName: playerB.nickname,
+      direction: room.direction,
+      referenceAnswer: material?.referenceAnswer,
     })
       .then((pairResult) => {
         subA.gradingStatus = 'graded';
@@ -1310,6 +1354,7 @@ class PvpManager {
         id: deterministicId,
         type: 'pvp',
         year: room.year,
+        direction: room.direction,
         timestamp: Date.now(),
         totalScore: player.totalScore,
         timeSpentSeconds: room.startedAt

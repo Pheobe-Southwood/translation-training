@@ -12,18 +12,21 @@ import {
   ChevronUp,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
-import type { TranslationExam, SegmentSubmission, HistorySessionRecord } from '../../shared/types.js';
+import type { TranslationExam, SegmentSubmission, HistorySessionRecord, TranslationDirection } from '../../shared/types.js';
+import { directionLabel, directionShort } from '../../shared/direction.js';
 import { getAuthToken, saveHistoryRecord } from '../utils/storage.js';
 import { playSuccessSound } from '../utils/sound.js';
 import { GradingCard } from '../components/GradingCard.js';
 
 interface SoloViewProps {
   year: number;
+  direction: TranslationDirection;
   onBack: () => void;
   onFinishSession?: () => void;
 }
 
-export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
+export const SoloView: React.FC<SoloViewProps> = ({ year, direction, onBack }) => {
+  const isZhEn = direction === 'zh-en';
   const [exam, setExam] = useState<TranslationExam | null>(null);
   const [loading, setLoading] = useState(true);
   const [currentIdx, setCurrentIdx] = useState(0);
@@ -35,14 +38,14 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
   const [isPassageOpenMobile, setIsPassageOpenMobile] = useState(false);
 
   const sessionIdRef = useRef<string>(
-    `solo-${year}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    `solo-${year}-${direction}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   );
   const hasPersistedRef = useRef<boolean>(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     fetchExam();
-  }, [year]);
+  }, [year, direction]);
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -54,7 +57,7 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
     setLoading(true);
     try {
       const token = getAuthToken();
-      const res = await fetch(`/api/exams/${year}`, {
+      const res = await fetch(`/api/exams/${year}?direction=${direction}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
@@ -101,12 +104,11 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
       setIsAllCompleted(true);
     }
 
-    triggerBackgroundGrading(segmentIndexToSubmit, originalText, answerToSubmit);
+    triggerBackgroundGrading(segmentIndexToSubmit, answerToSubmit);
   };
 
   const triggerBackgroundGrading = async (
     segmentIndex: number,
-    targetSentence: string,
     studentAnswer: string
   ) => {
     try {
@@ -118,10 +120,10 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          fullArticle: exam?.contentMarkdown || '',
-          targetSentence,
-          studentAnswer,
+          year,
+          direction,
           segmentIndex,
+          studentAnswer,
         }),
       });
 
@@ -169,6 +171,7 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
           id: sessionIdRef.current,
           type: 'solo',
           year,
+          direction,
           timestamp: Date.now(),
           totalScore: finalScore,
           timeSpentSeconds: Math.floor((Date.now() - startTime) / 1000),
@@ -197,7 +200,7 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
         } catch {}
       }
     }
-  }, [submissions, isAllCompleted, year, startTime]);
+  }, [submissions, isAllCompleted, year, direction, startTime]);
 
   const renderPassageWithHighlight = (passage: string, activeSentence: string) => {
     if (!passage) return null;
@@ -232,7 +235,7 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
     return (
       <div className="max-w-7xl mx-auto px-4 py-20 text-center font-mono text-xs text-zinc-600 dark:text-zinc-400">
         <Loader2 className="w-8 h-8 animate-spin mx-auto text-swiss-red mb-3" />
-        正在加载 {year} 年考研真题与长难句意群...
+        正在加载 {year} 年考研真题（{directionLabel(direction)}）...
       </div>
     );
   }
@@ -255,6 +258,11 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
           <ArrowLeft className="w-3.5 h-3.5" />
           <span>返回</span>
         </button>
+
+        <div className="flex items-center gap-1.5 font-mono text-[10px] sm:text-xs font-bold uppercase border border-swiss-black dark:border-zinc-700 bg-zinc-100 dark:bg-zinc-800 px-2 py-1">
+          <span className="text-swiss-red">{directionShort(direction)}</span>
+          <span className="text-zinc-500 dark:text-zinc-400">{directionLabel(direction)}</span>
+        </div>
 
         {/* 5-step Indicator */}
         <div className="flex items-center gap-1.5 font-mono text-xs">
@@ -308,14 +316,14 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
                 <div className="flex items-center gap-2">
                   <span className="w-2.5 h-2.5 bg-swiss-red"></span>
                   <span className="font-mono text-xs font-bold uppercase tracking-wider text-swiss-black dark:text-zinc-100">
-                    本题待译长难句 [0{currentIdx + 1} / 05]
+                    {isZhEn ? '本题待译中文原句' : '本题待译长难句'} [0{currentIdx + 1} / 05]
                   </span>
                 </div>
                 <span className="font-mono text-xs font-bold text-zinc-400 dark:text-zinc-500">满分 2.0 分</span>
               </div>
 
               {/* Target Segment English Content */}
-              <div className="p-3 sm:p-4 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-300 dark:border-zinc-700 font-serif text-sm sm:text-base md:text-lg leading-relaxed text-zinc-900 dark:text-zinc-100 selection:bg-swiss-red selection:text-white">
+              <div className={`p-3 sm:p-4 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-300 dark:border-zinc-700 ${isZhEn ? 'font-zh' : 'font-serif'} text-sm sm:text-base md:text-lg leading-relaxed text-zinc-900 dark:text-zinc-100 selection:bg-swiss-red selection:text-white`}>
                 {currentSegment}
               </div>
 
@@ -323,7 +331,7 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between font-mono text-xs text-zinc-500 dark:text-zinc-400">
                   <label htmlFor="answer-input" className="font-bold uppercase text-[11px]">
-                    输入您的中文翻译：
+                    {isZhEn ? '输入您的英文翻译：' : '输入您的中文翻译：'}
                   </label>
                   <span className="text-[10px] hidden sm:inline">Ctrl + Enter 快捷提交</span>
                 </div>
@@ -338,7 +346,7 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
                     }
                   }}
                   rows={4}
-                  placeholder="在此输入中文翻译..."
+                  placeholder={isZhEn ? '在此输入英文翻译...' : '在此输入中文翻译...'}
                   className="w-full border-2 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-800 p-3 font-sans text-base sm:text-sm focus:outline-none focus:border-swiss-red dark:focus:border-swiss-red transition-colors placeholder:text-zinc-400 dark:placeholder:text-zinc-500 text-swiss-black dark:text-zinc-100 resize-none leading-relaxed"
                 />
               </div>
@@ -405,6 +413,7 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
                 studentAnswer={submissions[activeCardTab].studentAnswer}
                 originalText={submissions[activeCardTab].originalText}
                 segmentIndex={activeCardTab}
+                direction={direction}
               />
             )}
 
@@ -418,12 +427,12 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
                 <div className="flex items-center gap-2">
                   <BookOpen className="w-4 h-4 text-zinc-600 dark:text-zinc-400" />
                   <span className="font-mono text-xs font-bold uppercase tracking-wider text-zinc-700 dark:text-zinc-200">
-                    PASSAGE CONTEXT // {year} 年短文语境
+                    {isZhEn ? 'CHINESE CONTEXT' : 'PASSAGE CONTEXT'} // {year} 年{isZhEn ? '中文语境' : '短文语境'}
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="font-mono text-[10px] bg-rose-100 dark:bg-rose-950/80 text-swiss-red dark:text-rose-200 border border-rose-300 dark:border-rose-800 px-2 py-0.5 font-bold uppercase hidden sm:inline">
-                    红色标尺即为本题目标
+                    {isZhEn ? '中文题干 · 英文作答' : '红色标尺即为本题目标'}
                   </span>
                   <div className="text-zinc-500 dark:text-zinc-400 lg:hidden">
                     {isPassageOpenMobile ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
@@ -433,11 +442,16 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
 
               {/* Passage text: Persistent on desktop, toggleable on mobile */}
               <div
-                className={`p-4 sm:p-6 max-h-[460px] overflow-y-auto leading-relaxed ${
+                className={`p-4 sm:p-6 leading-relaxed ${
                   isPassageOpenMobile ? 'block' : 'hidden lg:block'
                 }`}
               >
                 {renderPassageWithHighlight(exam.contentMarkdown, currentSegment)}
+                {isZhEn && (
+                  <div className="mt-3 pt-2 border-t border-zinc-200 dark:border-zinc-700 font-mono text-[10px] text-zinc-500 dark:text-zinc-400">
+                    语境为网络参考译文；若未高亮，以上方中文题干为准。
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -455,7 +469,7 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
                 EXAMINATION COMPLETED // 练习完成
               </div>
               <h2 className="text-2xl sm:text-4xl md:text-5xl font-black uppercase text-swiss-black dark:text-zinc-100">
-                {year} 年英语（一）翻译总评
+                {year} 年英语（一）{directionLabel(direction)}总评
               </h2>
             </div>
 
@@ -477,7 +491,7 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
             <div className="flex flex-wrap items-center justify-center gap-3 sm:gap-4 pt-4">
               <button
                 onClick={() => {
-                  sessionIdRef.current = `solo-${year}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                  sessionIdRef.current = `solo-${year}-${direction}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
                   hasPersistedRef.current = false;
                   setCurrentIdx(0);
                   setIsAllCompleted(false);
@@ -511,6 +525,7 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, onBack }) => {
                   studentAnswer={sub.studentAnswer}
                   originalText={sub.originalText}
                   segmentIndex={idx}
+                  direction={direction}
                 />
               );
             })}

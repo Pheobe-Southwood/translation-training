@@ -1,6 +1,7 @@
 import React from 'react';
 import { Loader2, Check, Hourglass, Eye, LogOut, Swords, Trophy } from 'lucide-react';
-import type { PlayerState } from '../../shared/types.js';
+import type { PlayerState, TranslationDirection } from '../../shared/types.js';
+import { directionShort } from '../../shared/direction.js';
 
 interface PvpHudProps {
   players: PlayerState[];
@@ -9,6 +10,7 @@ interface PvpHudProps {
   spectatorCount?: number;
   secondsRemaining: number;
   roomCode: string;
+  direction?: TranslationDirection;
   onExit?: () => void;
 }
 
@@ -19,6 +21,7 @@ export const PvpHud: React.FC<PvpHudProps> = ({
   spectatorCount = 0,
   secondsRemaining,
   roomCode,
+  direction = 'en-zh',
   onExit,
 }) => {
   const formatTime = (seconds: number) => {
@@ -77,6 +80,10 @@ export const PvpHud: React.FC<PvpHudProps> = ({
 
             <span className="font-mono text-[10px] sm:text-xs font-bold px-1.5 py-0.5 bg-zinc-800 text-zinc-300 uppercase">
               {players.length}人局
+            </span>
+
+            <span className="font-mono text-[10px] sm:text-xs font-bold px-1.5 py-0.5 bg-zinc-900 border border-zinc-700 text-swiss-red uppercase whitespace-nowrap">
+              {directionShort(direction)}
             </span>
 
             {isSpectator && (

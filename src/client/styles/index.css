@@ -84,3 +84,16 @@
   padding-bottom: max(1rem, env(safe-area-inset-bottom, 1rem));
 }
 
+
+
+/* Respect the user's reduced-motion preference across the Swiss UI. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

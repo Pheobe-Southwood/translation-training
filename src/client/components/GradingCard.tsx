@@ -1,12 +1,13 @@
 import React from 'react';
 import { CheckCircle2, XCircle, AlertCircle, Quote, Sparkles } from 'lucide-react';
-import type { GradingResult } from '../../shared/types.js';
+import type { GradingResult, TranslationDirection } from '../../shared/types.js';
 
 interface GradingCardProps {
   result: GradingResult;
   studentAnswer: string;
   originalText: string;
   segmentIndex: number;
+  direction?: TranslationDirection;
 }
 
 export const GradingCard: React.FC<GradingCardProps> = ({
@@ -14,7 +15,9 @@ export const GradingCard: React.FC<GradingCardProps> = ({
   studentAnswer,
   originalText,
   segmentIndex,
+  direction = 'en-zh',
 }) => {
+  const isZhEn = direction === 'zh-en';
   return (
     <div className="border-2 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-900 p-4 sm:p-6 shadow-[4px_4px_0px_0px_#09090b] dark:shadow-[4px_4px_0px_0px_#000000] space-y-4 sm:space-y-5">
       {/* Top Header */}
@@ -46,10 +49,10 @@ export const GradingCard: React.FC<GradingCardProps> = ({
             <span>扣分扣除：</span>
           </div>
           {result.distortion_deduction > 0 && (
-            <div>• 意思扭曲扣分：-{result.distortion_deduction} 分</div>
+            <div>• {isZhEn ? '意思扭曲/漏译扣分' : '意思扭曲扣分'}：-{result.distortion_deduction} 分</div>
           )}
           {result.fluency_deduction > 0 && (
-            <div>• 表达通顺度扣分：-{result.fluency_deduction} 分</div>
+            <div>• {isZhEn ? '英语语法与表达扣分' : '表达通顺度扣分'}：-{result.fluency_deduction} 分</div>
           )}
         </div>
       )}
@@ -58,9 +61,13 @@ export const GradingCard: React.FC<GradingCardProps> = ({
           the sentence so a reviewer can fix their own version line by line. */}
       <div className="space-y-2">
         {originalText && (
-          <div className="p-3 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700 font-serif text-sm leading-relaxed text-zinc-900 dark:text-zinc-100">
+          <div
+            className={`p-3 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700 text-sm leading-relaxed text-zinc-900 dark:text-zinc-100 ${
+              isZhEn ? 'font-zh' : 'font-serif'
+            }`}
+          >
             <div className="font-mono text-[10px] text-zinc-500 dark:text-zinc-400 uppercase font-bold mb-1">
-              原文长难句
+              {isZhEn ? '中文原句' : '原文长难句'}
             </div>
             {originalText}
           </div>
@@ -68,9 +75,14 @@ export const GradingCard: React.FC<GradingCardProps> = ({
 
         <div className="p-3 bg-rose-50/70 dark:bg-rose-950/40 border-2 border-rose-300 dark:border-rose-900/70">
           <div className="font-mono text-[10px] text-swiss-red dark:text-rose-400 uppercase font-bold mb-1 flex items-center gap-1">
-            <Quote className="w-3 h-3" /> 官方标准参考译文
+            <Quote className="w-3 h-3" /> {isZhEn ? '标准英文参考译文' : '标准参考译文'}
           </div>
-          <div className="text-sm text-zinc-900 dark:text-zinc-100 font-medium leading-relaxed">
+          <div
+            lang={isZhEn ? 'en' : 'zh-CN'}
+            className={`text-sm text-zinc-900 dark:text-zinc-100 font-medium leading-relaxed ${
+              isZhEn ? 'font-serif' : 'font-zh'
+            }`}
+          >
             {result.reference_translation || '（本题暂无参考译文）'}
           </div>
         </div>
@@ -123,9 +135,14 @@ export const GradingCard: React.FC<GradingCardProps> = ({
       <div className="space-y-3 pt-2">
         <div className="p-3 bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200 dark:border-zinc-700">
           <div className="font-mono text-[10px] text-zinc-500 dark:text-zinc-400 uppercase font-bold mb-1">
-            你的译文
+            {isZhEn ? '你的英文译文' : '你的中文译文'}
           </div>
-          <div className="text-xs text-swiss-black dark:text-zinc-100 font-medium leading-relaxed">
+          <div
+            lang={isZhEn ? 'en' : 'zh-CN'}
+            className={`text-xs text-swiss-black dark:text-zinc-100 font-medium leading-relaxed ${
+              isZhEn ? 'font-serif' : 'font-zh'
+            }`}
+          >
             {studentAnswer || '（未作答）'}
           </div>
         </div>

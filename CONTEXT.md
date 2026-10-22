@@ -11,7 +11,10 @@ This document defines the core domain concepts, entities, and ubiquitous languag
 - **Exam (考研真题套卷)**: A single year's master's entrance examination paper for English I (2002–2026), focused on the translation section. Each exam contains an overarching passage and a set of designated translation targets.
 - **Passage (短文全文)**: The complete source article in English that provides linguistic context, theme, and surrounding discourse for the highlighted translation sentences.
 - **Translation Segment (目标划线句)**: A designated sentence or clause within the passage identified with a question marker (such as `(61)` or `(1)`), worth a maximum of 2.0 points. Each exam contains exactly 5 translation segments (totaling 10.0 points).
-- **Reference Translation (标准参考译文)**: An authoritative, fluent Chinese translation of the target segment used for comparative review and study.
+- **Reference Translation (标准参考译文)**: A published, fluent Chinese translation of the target segment used for comparative review and study. It is the same sentence used as the Chinese→English prompt.
+- **Translation Direction (翻译方向)**: `en-zh` (English source → Chinese answer, the original mode) or `zh-en` (Chinese source → English answer). Direction is a session/room setting; the solo and PVP rules are otherwise identical.
+- **Reverse Prompt Bank (反向题干)**: For Chinese→English, the Chinese prompt is the researched reference translation of an existing English target; the existing English target is the standard answer. No new English questions are added.
+- **Reference Segment Source (译文来源标记)**: `web` (published answer as-is), `web-completed` (published answer minimally completed/corrected against the existing English), or `reviewed-fallback` (no public answer exists for this exact non-underlined sentence; hand-checked translation).
 
 ### 2. Practice & Modes (练习与对战模式)
 
@@ -27,10 +30,10 @@ This document defines the core domain concepts, entities, and ubiquitous languag
 ### 3. Evaluation & Grading (采分与阅卷)
 
 - **Grading Rubric (阅卷细则)**: The strict, official scoring standard applied to each translation segment:
-  - **Single Sentence Score (单句得分)**: `Points Earned (0–2.0) - Distortion Deduction - Fluency Deduction`.
+  - **Single Sentence Score (单句得分)**: For English→Chinese, `Points Earned (0–2.0) - Distortion Deduction - Fluency Deduction`. For Chinese→English, `4 × 0.5 information points - distortion/omission - English language quality`, capped at 0.5 for serious distortion.
   - **Key Scoring Points (采分点)**: 3 to 4 grammatical structures, idiomatic phrases, or sense groups in the sentence, each worth 0.5 points.
   - **Distortion Deduction (意思扭曲扣分)**: A severe penalty applied when the core meaning of the original sentence is inverted, negated, or fatally misconstrued. If core meaning is distorted, the maximum possible sentence score is capped at 0.5 points.
-  - **Fluency Deduction (通顺度扣分)**: A penalty of 0 to 0.5 points for rigid translationese, awkward phrasing, or non-idiomatic Chinese expressions.
+  - **Fluency Deduction (通顺度扣分)**: A penalty of 0 to 0.5 points for rigid translationese, awkward phrasing, or non-idiomatic Chinese expressions. In Chinese→English it is the English grammar/expression deduction.
   - **Grade Critique (阅卷点评)**: Specific analytical feedback explaining which scoring points were hit, points missed, and reasons for any deductions.
   - **Paired Segment Evaluation (并列意群裁决)**: In PVP matches, both players' submissions for the same target sentence are forwarded together in a single prompt to DeepSeek. Under identical context and uniform strictness, AI grades both translations simultaneously via tool calling, outputting individual rubrics along with a comparative analysis to eliminate variance.
 
@@ -44,4 +47,4 @@ This document defines the core domain concepts, entities, and ubiquitous languag
 - **Access Pass (站点访问密码)**: A gatekeeper credential required to enter the platform and initiate AI grading sessions, protecting shared API resources.
 - **Spectate Ticket (观战凭证)**: A signed, expiring credential bound to one room code and embedded in a spectate link. It authorises watching a single room without an account, and grants nothing else.
 - **Player Profile (选手标识)**: A lightweight nickname chosen by the user for PVP representation and local session history tracking.
-- **Session Record (练习档案)**: A historical log of completed solo sessions or PVP matches, recording the date, exam year, individual segment translations, scores, and critiques.
+- **Session Record (练习档案)**: A historical log of completed solo sessions or PVP matches, recording the date, exam year, translation direction, individual segment translations, scores, and critiques.
