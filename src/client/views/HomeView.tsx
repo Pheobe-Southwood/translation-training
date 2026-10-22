@@ -1,14 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { ArrowRight, Dices, Swords, Trophy } from 'lucide-react';
 import { getAuthToken } from '../utils/storage.js';
+import type { TranslationDirection } from '../../shared/types.js';
+import { directionLabel } from '../../shared/direction.js';
 
 interface HomeViewProps {
+  direction: TranslationDirection;
+  onChangeDirection: (direction: TranslationDirection) => void;
   onStartSolo: (year: number) => void;
   onEnterPvpLobby: (selectedYear: number) => void;
   onViewHistory: () => void;
 }
 
 export const HomeView: React.FC<HomeViewProps> = ({
+  direction,
+  onChangeDirection,
   onStartSolo,
   onEnterPvpLobby,
   onViewHistory,
@@ -16,6 +22,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
   const [years, setYears] = useState<number[]>([]);
   const [selectedYear, setSelectedYear] = useState<number>(2024);
   const [loading, setLoading] = useState(true);
+  const isZhEn = direction === 'zh-en';
 
   useEffect(() => {
     fetchYears();
@@ -63,8 +70,95 @@ export const HomeView: React.FC<HomeViewProps> = ({
         </h1>
 
         <p className="text-xs md:text-sm text-zinc-600 dark:text-zinc-400 font-mono leading-relaxed max-w-3xl">
-          收录 2002–2026 全年 25 套真题长难句 · 接入官方 DeepSeek 深度高推理阅卷 · 支持 2–4 人实时对战与观战大屏
+          收录 2002–2026 全年 25 套真题长难句 · 英译中 / 中译英双向训练 · DeepSeek 严格阅卷 · 支持 2–4 人实时对战与观战大屏
         </p>
+      </div>
+
+      {/* Translation Direction Route Board */}
+      <div className="border-2 sm:border-4 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-900 shadow-[6px_6px_0px_0px_#09090b] dark:shadow-[6px_6px_0px_0px_#000000]">
+        <div className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-3 border-b-2 border-swiss-black dark:border-zinc-700">
+          <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 bg-swiss-red"></span>
+            <span className="font-mono text-[10px] sm:text-xs font-bold uppercase tracking-widest text-zinc-600 dark:text-zinc-300">
+              TRANSLATION DIRECTION // 翻译方向
+            </span>
+          </div>
+          <span className="font-mono text-[10px] sm:text-xs font-bold uppercase text-zinc-400 dark:text-zinc-500">
+            SELECT ONE ROUTE
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2">
+          <button
+            type="button"
+            aria-pressed={!isZhEn}
+            onClick={() => onChangeDirection('en-zh')}
+            className={`text-left p-5 sm:p-7 transition-colors focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-swiss-red/40 ${
+              !isZhEn
+                ? 'bg-swiss-black text-white dark:bg-zinc-100 dark:text-swiss-black'
+                : 'bg-white text-swiss-black hover:bg-zinc-50 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2 mb-4">
+              <span className="font-mono text-[10px] sm:text-xs font-bold uppercase tracking-widest opacity-70">
+                MODE A // 英译中
+              </span>
+              {!isZhEn && (
+                <span className="bg-swiss-red text-white font-mono text-[9px] sm:text-[10px] font-black px-2 py-0.5 uppercase">
+                  当前方向
+                </span>
+              )}
+            </div>
+            <div className="flex items-baseline gap-3 sm:gap-4">
+              <span className="text-4xl sm:text-6xl font-black tracking-tighter">EN</span>
+              <span className="text-2xl sm:text-3xl font-black text-swiss-red">→</span>
+              <span className="text-4xl sm:text-6xl font-black tracking-tight font-zh">中</span>
+            </div>
+            <p className="mt-3 text-[11px] sm:text-xs font-mono leading-relaxed opacity-70">
+              读英文真题长难句，写中文译文
+            </p>
+          </button>
+
+          <button
+            type="button"
+            aria-pressed={isZhEn}
+            onClick={() => onChangeDirection('zh-en')}
+            className={`text-left p-5 sm:p-7 border-t-2 sm:border-t-0 sm:border-l-2 border-swiss-black dark:border-zinc-700 transition-colors focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-swiss-red/40 ${
+              isZhEn
+                ? 'bg-swiss-black text-white dark:bg-zinc-100 dark:text-swiss-black'
+                : 'bg-white text-swiss-black hover:bg-zinc-50 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2 mb-4">
+              <span className="font-mono text-[10px] sm:text-xs font-bold uppercase tracking-widest opacity-70">
+                MODE B // 中译英
+              </span>
+              <span className="flex items-center gap-1.5">
+                {isZhEn ? (
+                  <span className="bg-swiss-red text-white font-mono text-[9px] sm:text-[10px] font-black px-2 py-0.5 uppercase">
+                    当前方向
+                  </span>
+                ) : (
+                  <span className="border border-swiss-red text-swiss-red font-mono text-[9px] sm:text-[10px] font-black px-2 py-0.5 uppercase">
+                    NEW
+                  </span>
+                )}
+              </span>
+            </div>
+            <div className="flex items-baseline gap-3 sm:gap-4">
+              <span className="text-4xl sm:text-6xl font-black tracking-tight font-zh">中</span>
+              <span className="text-2xl sm:text-3xl font-black text-swiss-red">→</span>
+              <span className="text-4xl sm:text-6xl font-black tracking-tighter">EN</span>
+            </div>
+            <p className="mt-3 text-[11px] sm:text-xs font-mono leading-relaxed opacity-70">
+              读中文标准译文，写英文原句
+            </p>
+          </button>
+        </div>
+
+        <div className="px-4 sm:px-6 py-3 border-t-2 border-swiss-black dark:border-zinc-700 font-mono text-[10px] sm:text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+          中译英题干 = 网络公开标准译文；英文原句 = 标准答案。选择方向后，年份与模式沿用现有规则。
+        </div>
       </div>
 
       {/* Grid: Year Selection & Mode Selection */}
@@ -112,7 +206,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
 
             <div className="mt-4 pt-3 border-t border-zinc-100 dark:border-zinc-800 flex items-center justify-between text-xs font-mono text-zinc-500 dark:text-zinc-400">
               <span>当前选中试卷：</span>
-              <span className="font-bold text-swiss-black dark:text-zinc-100">{selectedYear} 年英语（一）翻译</span>
+              <span className="font-bold text-swiss-black dark:text-zinc-100">{selectedYear} 年英语（一）{directionLabel(direction)}</span>
             </div>
           </div>
         </div>
@@ -132,14 +226,14 @@ export const HomeView: React.FC<HomeViewProps> = ({
               单人练习模式
             </h3>
             <p className="text-xs font-mono text-zinc-600 dark:text-zinc-400 mb-5 leading-relaxed">
-              逐句翻译 5 道真题长难句。确认提交上一句后系统后台异步评分，瞬时切换下一题。
+              {isZhEn ? '逐句翻译 5 道中文标准译文。确认提交上一句后系统后台异步评分，瞬时切换下一题。' : '逐句翻译 5 道真题长难句。确认提交上一句后系统后台异步评分，瞬时切换下一题。'}
             </p>
 
             <button
               onClick={() => onStartSolo(selectedYear)}
               className="w-full py-3.5 bg-swiss-black hover:bg-swiss-red dark:bg-zinc-100 dark:text-swiss-black dark:hover:bg-swiss-red dark:hover:text-white text-white font-mono text-xs font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-2 active:scale-[0.99]"
             >
-              <span>开始 {selectedYear} 年练习</span>
+              <span>开始 {selectedYear} 年{directionLabel(direction)}练习</span>
               <ArrowRight className="w-4 h-4" />
             </button>
           </div>
@@ -157,7 +251,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
               PVP 多人竞技与观战大屏
             </h3>
             <p className="text-xs font-mono text-zinc-600 dark:text-zinc-400 mb-5 leading-relaxed">
-              支持 2–4 人自定义房间人数同题竞速，并开放实时观战位大屏，实时追踪全场选手作答内容与 AI 判分。
+              {isZhEn ? '支持 2–4 人同题中译英竞速，并开放实时观战位大屏，实时追踪全场英文作答与 AI 判分。' : '支持 2–4 人自定义房间人数同题竞速，并开放实时观战位大屏，实时追踪全场选手作答内容与 AI 判分。'}
             </p>
 
             <button

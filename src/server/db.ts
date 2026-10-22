@@ -1,7 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
-import type { HistorySessionRecord } from '../shared/types.js';
+import type { HistorySessionRecord, TranslationDirection } from '../shared/types.js';
+import { normalizeDirection } from '../shared/direction.js';
 
 export interface UserRow {
   id: string;
@@ -18,6 +19,7 @@ export interface HistoryRow {
   user_id: string;
   type: 'solo' | 'pvp';
   year: number;
+  direction: TranslationDirection;
   timestamp: number;
   total_score: number;
   time_spent_seconds: number;
@@ -59,6 +61,7 @@ class AppDatabase {
         user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         type TEXT NOT NULL,
         year INTEGER NOT NULL,
+        direction TEXT NOT NULL DEFAULT 'en-zh',
         timestamp INTEGER NOT NULL,
         total_score REAL NOT NULL,
         time_spent_seconds INTEGER NOT NULL,
@@ -68,6 +71,17 @@ class AppDatabase {
 
       CREATE INDEX IF NOT EXISTS idx_history_user_time ON history_records (user_id, timestamp DESC);
     `);
+
+    // Additive migration for databases created before the direction column.
+    const columns = this.db.prepare('PRAGMA table_info(history_records)').all() as Array<{
+      name?: string;
+    }>;
+    if (!columns.some((column) => column.name === 'direction')) {
+      this.db.exec(
+        "ALTER TABLE history_records ADD COLUMN direction TEXT NOT NULL DEFAULT 'en-zh'"
+      );
+      console.log('[db] Added history_records.direction (default en-zh)');
+    }
   }
 
   // --- Users Operations ---
@@ -139,22 +153,31 @@ class AppDatabase {
     const submissionsJson = JSON.stringify(record.submissions || []);
     const pvpDetailsJson = record.pvpDetails ? JSON.stringify(record.pvpDetails) : null;
     const now = record.timestamp || Date.now();
+    const direction = normalizeDirection(record.direction);
 
     // Defense-in-depth: Check for duplicate/prior submissions within a window (e.g. 120s)
     // or by matching record id, to update in place and prevent duplicate inserts.
     const dupCheckStmt = this.db.prepare(`
       SELECT id FROM history_records
-      WHERE user_id = ? AND type = ? AND year = ? AND (id = ? OR abs(timestamp - ?) < 120000)
+      WHERE user_id = ? AND type = ? AND year = ? AND direction = ?
+        AND (id = ? OR abs(timestamp - ?) < 120000)
       LIMIT 1
     `);
-    const existing = dupCheckStmt.get(userId, record.type, record.year, record.id, now) as { id: string } | undefined;
+    const existing = dupCheckStmt.get(
+      userId,
+      record.type,
+      record.year,
+      direction,
+      record.id,
+      now
+    ) as { id: string } | undefined;
 
     const targetId = existing?.id || record.id;
 
     const stmt = this.db.prepare(`
       INSERT INTO history_records (
-        id, user_id, type, year, timestamp, total_score, time_spent_seconds, submissions_json, pvp_details_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, user_id, type, year, direction, timestamp, total_score, time_spent_seconds, submissions_json, pvp_details_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         total_score = excluded.total_score,
         submissions_json = excluded.submissions_json,
@@ -166,6 +189,7 @@ class AppDatabase {
       userId,
       record.type,
       record.year,
+      direction,
       now,
       record.totalScore,
       record.timeSpentSeconds || 0,
@@ -186,6 +210,7 @@ class AppDatabase {
       id: r.id,
       type: r.type,
       year: r.year,
+      direction: normalizeDirection(r.direction),
       timestamp: r.timestamp,
       totalScore: r.total_score,
       timeSpentSeconds: r.time_spent_seconds,

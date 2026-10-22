@@ -15,9 +15,10 @@ import {
   verifySpectateTicket,
 } from './auth.js';
 import { db } from './db.js';
-import { getExamByYear, getExamYears, getRandomExam } from './examService.js';
+import { getExamByYear, getExamYears, getGradingMaterial, getRandomExam } from './examService.js';
 import { gradeTranslation } from './deepseek.js';
 import { pvpManager } from './pvpManager.js';
+import { DEFAULT_DIRECTION, parseDirection } from '../shared/direction.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -277,17 +278,31 @@ async function main() {
     return { years: getExamYears() };
   });
 
-  app.get('/api/exams/random', async () => {
-    const exam = getRandomExam();
-    return { exam };
+  app.get('/api/exams/random', async (req, reply) => {
+    const rawDirection = (req.query as any)?.direction;
+    const direction = rawDirection === undefined ? DEFAULT_DIRECTION : parseDirection(rawDirection);
+    if (!direction) {
+      return reply.status(400).send({ error: '无效的翻译方向，仅支持 en-zh 或 zh-en' });
+    }
+    try {
+      const exam = getRandomExam(direction);
+      return { exam };
+    } catch (err: any) {
+      return reply.status(404).send({ error: err.message || '题库暂不可用' });
+    }
   });
 
   app.get('/api/exams/:year', async (req, reply) => {
     const params = req.params as { year: string };
     const year = parseInt(params.year, 10);
-    const exam = getExamByYear(year);
+    const rawDirection = (req.query as any)?.direction;
+    const direction = rawDirection === undefined ? DEFAULT_DIRECTION : parseDirection(rawDirection);
+    if (!direction) {
+      return reply.status(400).send({ error: '无效的翻译方向，仅支持 en-zh 或 zh-en' });
+    }
+    const exam = getExamByYear(year, direction);
     if (!exam) {
-      return reply.status(404).send({ error: `未找到 ${year} 年真题` });
+      return reply.status(404).send({ error: `未找到 ${year} 年真题（${direction}）` });
     }
     return { exam };
   });
@@ -295,19 +310,49 @@ async function main() {
   // --- Solo Grading API ---
   app.post('/api/solo/grade', async (req, reply) => {
     const body = (req.body as any) || {};
-    const { fullArticle, targetSentence, studentAnswer, segmentIndex } = body;
+    const { fullArticle, targetSentence, studentAnswer, segmentIndex, year } = body;
+    const rawDirection = body.direction;
+    const direction =
+      rawDirection === undefined ? DEFAULT_DIRECTION : parseDirection(rawDirection);
 
-    if (!targetSentence) {
-      return reply.status(400).send({ error: 'Missing targetSentence' });
+    if (!direction) {
+      return reply.status(400).send({ error: '无效的翻译方向，仅支持 en-zh 或 zh-en' });
+    }
+
+    const hasStructuredExam = Number.isInteger(year) && Number.isInteger(segmentIndex);
+    let material: { sourceText: string; referenceAnswer: string; fullSource: string } | undefined;
+    let gradingDirection = direction;
+
+    if (hasStructuredExam) {
+      material = getGradingMaterial(year, direction, segmentIndex);
+      if (!material) {
+        return reply.status(404).send({ error: `未找到 ${year} 年第 ${segmentIndex + 1} 题的材料` });
+      }
+    } else if (direction === 'en-zh' && targetSentence) {
+      // Backward-compatible English→Chinese payload used by older clients.
+      material = {
+        sourceText: String(targetSentence),
+        referenceAnswer: '',
+        fullSource: String(fullArticle || ''),
+      };
+      gradingDirection = 'en-zh';
+    } else {
+      return reply.status(400).send({
+        error: direction === 'zh-en'
+          ? '中译英评分需要 year 和 segmentIndex'
+          : 'Missing targetSentence',
+      });
     }
 
     try {
       const gradingResult = await gradeTranslation({
-        fullArticle: fullArticle || '',
-        targetSentence,
+        fullArticle: material.fullSource,
+        targetSentence: material.sourceText,
         studentAnswer: studentAnswer || '',
+        direction: gradingDirection,
+        referenceAnswer: material.referenceAnswer || undefined,
       });
-      return { success: true, segmentIndex, gradingResult };
+      return { success: true, segmentIndex, direction: gradingDirection, gradingResult };
     } catch (err: any) {
       req.log.error(err, 'Failed to grade translation via DeepSeek');
       return reply.status(500).send({ error: err.message || 'DeepSeek 评分失败' });

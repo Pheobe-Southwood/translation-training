@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import type { AuthUser, PvpRoomState } from '../shared/types.js';
+import type { AuthUser, PvpRoomState, TranslationDirection } from '../shared/types.js';
 import { SwissHeader } from './components/SwissHeader.js';
 import { PasswordGate } from './components/PasswordGate.js';
 import { HomeView } from './views/HomeView.js';
@@ -17,6 +17,8 @@ import {
   getSpectatorId,
   getStoredTheme,
   setStoredTheme,
+  getStoredDirection,
+  setStoredDirection,
   clearActivePvpRoom,
   getActivePvpRoom,
   type AppTheme,
@@ -56,6 +58,7 @@ export const App: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(() => getStoredUser());
   const [currentView, setCurrentView] = useState<'home' | 'solo' | 'pvp-lobby' | 'pvp-match' | 'history'>('home');
   const [selectedYear, setSelectedYear] = useState<number>(2024);
+  const [direction, setDirection] = useState<TranslationDirection>(() => getStoredDirection());
   const [nickname, setNickname] = useState<string>(() => getPlayerNickname());
 
   // Read-only spectate session (shareable link): no account required, and the
@@ -193,6 +196,11 @@ export const App: React.FC = () => {
     }
   };
 
+  const handleDirectionChange = (next: TranslationDirection) => {
+    setDirection(next);
+    setStoredDirection(next);
+  };
+
   const handleStartSolo = (year: number) => {
     setSelectedYear(year);
     setCurrentView('solo');
@@ -252,6 +260,8 @@ export const App: React.FC = () => {
       <main className="flex-1 pb-safe">
         {currentView === 'home' && (
           <HomeView
+            direction={direction}
+            onChangeDirection={handleDirectionChange}
             onStartSolo={handleStartSolo}
             onEnterPvpLobby={handleEnterPvpLobby}
             onViewHistory={() => setCurrentView('history')}
@@ -259,12 +269,14 @@ export const App: React.FC = () => {
         )}
 
         {currentView === 'solo' && (
-          <SoloView year={selectedYear} onBack={() => setCurrentView('home')} />
+          <SoloView year={selectedYear} direction={direction} onBack={() => setCurrentView('home')} />
         )}
 
         {currentView === 'pvp-lobby' && (
           <PvpLobbyView
             initialYear={selectedYear}
+            initialDirection={direction}
+            onDirectionChange={handleDirectionChange}
             playerId={playerId}
             nickname={isSpectateMode ? getPlayerNickname() : nickname}
             initialRoomCode={initialRoomCode}
@@ -304,7 +316,7 @@ export const App: React.FC = () => {
               </span>
             </div>
             <div>
-              SWISS DESIGN SYSTEM · DEEPSEEK HIGH REASONING · PVP ARENA
+              SWISS DESIGN SYSTEM · DEEPSEEK HIGH REASONING · REFERENCE ANSWERS: PUBLIC EXAM KEYS
             </div>
           </div>
         </footer>

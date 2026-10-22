@@ -15,13 +15,16 @@ import {
   Crown,
   X,
 } from 'lucide-react';
-import type { PvpRoomState } from '../../shared/types.js';
+import type { PvpRoomState, TranslationDirection } from '../../shared/types.js';
+import { directionLabel, directionShort } from '../../shared/direction.js';
 import { PvpSocket, type PvpConnectionStatus } from '../utils/pvpSocket.js';
 import { clearActivePvpRoom, getAuthToken, setActivePvpRoom } from '../utils/storage.js';
 import { copyTextToClipboard } from '../utils/clipboard.js';
 
 interface PvpLobbyViewProps {
   initialYear: number;
+  initialDirection?: TranslationDirection;
+  onDirectionChange?: (direction: TranslationDirection) => void;
   playerId: string;
   nickname: string;
   onBack: () => void;
@@ -36,6 +39,8 @@ interface PvpLobbyViewProps {
 
 export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
   initialYear,
+  initialDirection = 'en-zh',
+  onDirectionChange,
   playerId,
   nickname,
   onBack,
@@ -49,6 +54,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
   const [mode, setMode] = useState<'create' | 'join'>(initialRoomCode ? 'join' : 'create');
   const [roomCodeInput, setRoomCodeInput] = useState(initialRoomCode || '');
   const [selectedYear, setSelectedYear] = useState<number>(initialYear);
+  const [direction, setDirection] = useState<TranslationDirection>(initialDirection);
   const [durationMinutes, setDurationMinutes] = useState<number>(15);
   const [maxPlayers, setMaxPlayers] = useState<number>(2);
   const [allowSpectators, setAllowSpectators] = useState<boolean>(true);
@@ -231,6 +237,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
         durationMinutes,
         maxPlayers,
         allowSpectators,
+        direction,
       },
     });
   };
@@ -287,6 +294,21 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
     });
   };
 
+  const handleDirectionSelect = (next: TranslationDirection) => {
+    setDirection(next);
+    onDirectionChange?.(next);
+  };
+
+  const handleHostChangeDirection = (next: TranslationDirection) => {
+    setError(null);
+    setDirection(next);
+    onDirectionChange?.(next);
+    getSocket().send({
+      type: 'room:update_settings',
+      payload: { direction: next },
+    });
+  };
+
   const handleCopyLink = async () => {
     if (!currentRoom) return;
     const url = `${window.location.origin}/#/pvp/${currentRoom.roomCode}`;
@@ -298,7 +320,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
       try {
         await navigator.share({
           title: '考研英语翻译竞技场对战邀请',
-          text: `我在考研英语（一）翻译竞技场创建了 ${currentRoom.year} 年真题 ${currentRoom.maxPlayers} 人房间，房间码：${currentRoom.roomCode}，来决一胜负吧！`,
+          text: `我在考研英语（一）翻译竞技场创建了 ${currentRoom.year} 年真题（${directionLabel(currentRoom.direction)}）${currentRoom.maxPlayers} 人房间，房间码：${currentRoom.roomCode}，来决一胜负吧！`,
           url,
         });
         return;
@@ -550,6 +572,9 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
                 <span className="font-mono text-xs font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                   PVP ARENA ROOM // {roomMaxPlayers}人竞技大厅
                 </span>
+                <span className="bg-swiss-red text-white font-mono text-[10px] font-black px-2 py-0.5 uppercase">
+                  {directionShort(currentRoom.direction)} · {directionLabel(currentRoom.direction)}
+                </span>
                 {isMeSpectator && (
                   <span className="bg-blue-600 text-white font-mono text-[10px] font-bold px-2 py-0.5 uppercase flex items-center gap-1">
                     <Eye className="w-3 h-3" /> 观战视角
@@ -657,6 +682,39 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
                   className="flex-1 min-w-[160px] bg-white dark:bg-zinc-900 border border-blue-300 dark:border-blue-900 px-2.5 py-1 text-xs font-mono text-zinc-700 dark:text-zinc-200 select-all cursor-text focus:outline-none"
                 />
               </div>
+            )}
+          </div>
+
+          {/* Translation direction strip */}
+          <div className="mt-4 p-3 border-2 border-swiss-black dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/80 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2 font-mono">
+              <span className="text-[10px] font-bold uppercase text-zinc-500 dark:text-zinc-400">
+                TRANSLATION DIRECTION
+              </span>
+              <span className="text-sm font-black text-swiss-red">{directionShort(currentRoom.direction)}</span>
+              <span className="text-xs font-bold text-swiss-black dark:text-zinc-100">{directionLabel(currentRoom.direction)}</span>
+            </div>
+            {myPlayer?.isHost && currentRoom.status === 'WAITING' && !readOnlyViewer ? (
+              <div className="flex items-center gap-1.5">
+                {(['en-zh', 'zh-en'] as TranslationDirection[]).map((d) => (
+                  <button
+                    key={d}
+                    type="button"
+                    onClick={() => handleHostChangeDirection(d)}
+                    className={`px-2.5 py-1 border font-mono text-[10px] font-bold uppercase transition-colors ${
+                      currentRoom.direction === d
+                        ? 'bg-swiss-black dark:bg-zinc-100 text-white dark:text-swiss-black border-swiss-black dark:border-zinc-100'
+                        : 'bg-white dark:bg-zinc-900 text-zinc-600 dark:text-zinc-300 border-zinc-300 dark:border-zinc-700 hover:border-swiss-black'
+                    }`}
+                  >
+                    {directionShort(d)}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <span className="font-mono text-[10px] text-zinc-500 dark:text-zinc-400">
+                题干：{currentRoom.direction === 'zh-en' ? '中文标准译文' : '英文真题原句'} · 答案：{currentRoom.direction === 'zh-en' ? '英文原句' : '中文译文'}
+              </span>
             )}
           </div>
 
@@ -1010,6 +1068,32 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
         {mode === 'create' ? (
           /* Create Room Form */
           <div className="space-y-4 sm:space-y-5">
+            <div>
+              <label className="block text-xs font-mono font-bold uppercase mb-1.5 text-zinc-700 dark:text-zinc-300">
+                翻译方向 (TRANSLATION DIRECTION)
+              </label>
+              <div className="grid grid-cols-2 gap-2.5 sm:gap-3">
+                {(['en-zh', 'zh-en'] as TranslationDirection[]).map((d) => (
+                  <button
+                    key={d}
+                    type="button"
+                    onClick={() => handleDirectionSelect(d)}
+                    className={`py-3 px-3 border-2 text-left transition-all active:scale-[0.98] ${
+                      direction === d
+                        ? 'border-swiss-red bg-swiss-black text-white dark:bg-zinc-100 dark:text-swiss-black'
+                        : 'border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 hover:border-swiss-black'
+                    }`}
+                  >
+                    <span className="font-mono text-sm font-black">{directionShort(d)}</span>
+                    <span className="block text-[10px] font-mono mt-0.5 opacity-70">{directionLabel(d)}</span>
+                  </button>
+                ))}
+              </div>
+              <div className="mt-1.5 font-mono text-[10px] text-zinc-500 dark:text-zinc-400">
+                中译英题干来自网络公开中文标准译文，英文原句为标准答案。
+              </div>
+            </div>
+
             <div>
               <label className="block text-xs font-mono font-bold uppercase mb-1.5 text-zinc-700 dark:text-zinc-300">
                 选择对战真题年份
