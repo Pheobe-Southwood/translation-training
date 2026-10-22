@@ -442,7 +442,7 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, direction, onBack }) =
 
               {/* Passage text: Persistent on desktop, toggleable on mobile */}
               <div
-                className={`p-4 sm:p-6 max-h-[460px] overflow-y-auto leading-relaxed ${
+                className={`p-4 sm:p-6 leading-relaxed ${
                   isPassageOpenMobile ? 'block' : 'hidden lg:block'
                 }`}
               >
