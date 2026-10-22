@@ -13,6 +13,7 @@ import {
 import type { HistorySessionRecord } from '../../shared/types.js';
 import { getAuthToken, getLocalHistory, setLocalHistory, clearHistory } from '../utils/storage.js';
 import { GradingCard } from '../components/GradingCard.js';
+import { directionLabel, directionShort } from '../../shared/direction.js';
 
 interface HistoryViewProps {
   onBack: () => void;
@@ -158,6 +159,14 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onBack }) => {
                       {rec.type === 'pvp' ? 'PVP 对战' : '单人练习'}
                     </span>
 
+                    <span className={`font-mono text-[10px] font-black uppercase px-2 py-1 border shrink-0 ${
+                      rec.direction === 'zh-en'
+                        ? 'bg-rose-50 dark:bg-rose-950/40 text-swiss-red dark:text-rose-300 border-swiss-red/60'
+                        : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 border-zinc-300 dark:border-zinc-700'
+                    }`}>
+                      {directionShort(rec.direction || 'en-zh')} · {directionLabel(rec.direction || 'en-zh')}
+                    </span>
+
                     <div>
                       <div className="font-black text-sm sm:text-base text-swiss-black dark:text-zinc-100">
                         {rec.year} 年考研英语（一）翻译
@@ -235,6 +244,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onBack }) => {
                             studentAnswer={sub.studentAnswer}
                             originalText={sub.originalText}
                             segmentIndex={idx}
+                            direction={rec.direction || 'en-zh'}
                           />
                         );
                       })}

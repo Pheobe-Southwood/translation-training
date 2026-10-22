@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-e2e:
+    name: Build, validate, Playwright
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Secret scan
+        run: node scripts/check-secrets.mjs
+
+      - name: Typecheck (client + server)
+        run: pnpm typecheck
+
+      - name: Validate bilingual reference bank
+        run: pnpm validate:data
+
+      - name: Production build
+        run: pnpm build
+
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Start mock DeepSeek
+        run: |
+          nohup node scripts/mock-deepseek.mjs > /tmp/mock-deepseek.log 2>&1 &
+          echo $! > /tmp/mock-deepseek.pid
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8899/health >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          cat /tmp/mock-deepseek.log
+          exit 1
+
+      - name: Start built server
+        env:
+          NODE_ENV: production
+          PORT: 8890
+          HOST: 127.0.0.1
+          SITE_PASSWORD: tt8888
+          INVITATION_CODE: tt8888
+          DEEPSEEK_API_KEY: ci-mock
+          DEEPSEEK_BASE_URL: http://127.0.0.1:8899
+        run: |
+          nohup node dist/server/index.js > /tmp/server.log 2>&1 &
+          echo $! > /tmp/server.pid
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8890/api/health >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          cat /tmp/server.log
+          exit 1
+
+      - name: Playwright E2E (C→E solo + PVP + spectator + E→C regression)
+        env:
+          E2E_BASE_URL: http://127.0.0.1:8890
+          E2E_MODE: mock
+          E2E_INVITE_CODE: tt8888
+        run: pnpm test:e2e
+
+      - name: Upload Playwright screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-screenshots
+          path: /tmp/zh-en-e2e
+          if-no-files-found: ignore
+
+      - name: Upload server logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-logs
+          path: |
+            /tmp/server.log
+            /tmp/mock-deepseek.log
+          if-no-files-found: ignore
+
+      - name: Upload built app
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: translation-training-dist
+          path: dist
+          retention-days: 7
+
+      - name: Stop servers
+        if: always()
+        run: |
+          if [ -f /tmp/server.pid ]; then kill "$(cat /tmp/server.pid)" 2>/dev/null || true; fi
+          if [ -f /tmp/mock-deepseek.pid ]; then kill "$(cat /tmp/mock-deepseek.pid)" 2>/dev/null || true; fi

@@ -33,6 +33,13 @@ export default {
           'Arial',
           'sans-serif'
         ],
+        zh: [
+          '"Noto Serif SC"',
+          '"Songti SC"',
+          'STSong',
+          'SimSun',
+          'serif'
+        ],
         mono: [
           '"JetBrains Mono"',
           'ui-monospace',

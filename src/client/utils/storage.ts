@@ -1,4 +1,5 @@
-import type { AuthUser, HistorySessionRecord } from '../../shared/types.js';
+import type { AuthUser, HistorySessionRecord, TranslationDirection } from '../../shared/types.js';
+import { DEFAULT_DIRECTION, normalizeDirection } from '../../shared/direction.js';
 
 const STORAGE_KEYS = {
   TOKEN: 'tt_auth_token',
@@ -9,6 +10,7 @@ const STORAGE_KEYS = {
   ACTIVE_PVP_ROOM: 'tt_active_pvp_room',
   PVP_DRAFT: 'tt_pvp_draft',
   SPECTATOR_ID: 'tt_spec_id',
+  DIRECTION: 'tt_direction',
 };
 
 export type AppTheme = 'light' | 'dark';
@@ -90,6 +92,21 @@ export function setPvpDraft(draft: PvpDraft): void {
 export function clearPvpDraft(): void {
   try {
     sessionStorage.removeItem(STORAGE_KEYS.PVP_DRAFT);
+  } catch {}
+}
+
+export function getStoredDirection(): TranslationDirection {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEYS.DIRECTION);
+    return saved ? normalizeDirection(saved) : DEFAULT_DIRECTION;
+  } catch {
+    return DEFAULT_DIRECTION;
+  }
+}
+
+export function setStoredDirection(direction: TranslationDirection): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.DIRECTION, direction);
   } catch {}
 }
 

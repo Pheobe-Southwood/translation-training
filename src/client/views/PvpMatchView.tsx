@@ -56,6 +56,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
   onExit,
 }) => {
   const [roomState, setRoomState] = useState<PvpRoomState>(initialRoomState);
+  const isZhEn = roomState.direction === 'zh-en';
   const [currentAnswer, setCurrentAnswer] = useState('');
   const [secondsRemaining, setSecondsRemaining] = useState<number>(() => {
     if (initialRoomState.matchEndTime) {
@@ -301,6 +302,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
         id: `pvp-${finalState.roomCode}-${finalState.startedAt || Date.now()}-${playerId}`,
         type: 'pvp',
         year: finalState.year,
+        direction: finalState.direction,
         timestamp: Date.now(),
         totalScore: me.totalScore,
         timeSpentSeconds: finalState.startedAt
@@ -530,7 +532,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
               <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-zinc-200 dark:border-zinc-800">
                 <div className="flex items-center gap-2">
                   <span className="bg-swiss-red text-white font-mono text-xs font-black px-2 py-0.5 uppercase">
-                    Q{spectateSegmentIdx + 1} / 05 原文长难句
+                    Q{spectateSegmentIdx + 1} / 05 {isZhEn ? '中文原句' : '原文长难句'}
                   </span>
                   <span className="font-mono text-xs text-zinc-500 dark:text-zinc-400">
                     {roomState.year} 年考研英语一真题 · 满分 2.0 分
@@ -550,7 +552,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                 </button>
               </div>
 
-              <div className="p-3 sm:p-4 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-300 dark:border-zinc-700 font-serif text-sm sm:text-base leading-relaxed text-zinc-900 dark:text-zinc-100">
+              <div className={`p-3 sm:p-4 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-300 dark:border-zinc-700 ${isZhEn ? 'font-zh' : 'font-serif'} text-sm sm:text-base leading-relaxed text-zinc-900 dark:text-zinc-100`}>
                 {activeTargetSentence}
               </div>
 
@@ -755,7 +757,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
             <table className="w-full border-collapse font-mono text-xs min-w-[640px]">
               <thead>
                 <tr className="bg-swiss-black text-white border-b-2 border-swiss-black dark:border-zinc-700">
-                  <th className="p-3 text-left w-28 uppercase">题号 / 原文</th>
+                  <th className="p-3 text-left w-28 uppercase">题号 / 原句</th>
                   {rankings.map((r) => {
                     const p = roomState.players[r.playerId];
                     if (!p) return null;
@@ -883,6 +885,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
           spectatorCount={spectatorsList.length}
           secondsRemaining={0}
           roomCode={roomState.roomCode}
+          direction={roomState.direction}
           onExit={handleLeaveAndExit}
         />
 
@@ -1011,7 +1014,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                 全员逐题评定复盘与横向对比 ({allPlayers.length}人同题对照)
               </h2>
               <div className="font-mono text-xs text-zinc-500 dark:text-zinc-400 mt-1">
-                展示每位选手在全部 5 道长难句上的翻译原文、得分、AI 评语与采分点明细
+                {isZhEn ? '展示每位选手在全部 5 道中文原句上的英文译文、得分与 AI 评语' : '展示每位选手在全部 5 道长难句上的翻译原文、得分、AI 评语与采分点明细'}
               </div>
             </div>
 
@@ -1032,7 +1035,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                 >
                   <div className="flex items-center justify-between pb-2 border-b border-zinc-200 dark:border-zinc-800">
                     <span className="font-mono text-xs font-bold bg-swiss-black dark:bg-zinc-100 text-white dark:text-swiss-black px-2 py-0.5 uppercase">
-                      第 {idx + 1} 题长难句
+                      第 {idx + 1} 题{isZhEn ? '中文原句' : '长难句'}
                     </span>
                     <span className="font-mono text-xs text-zinc-400 dark:text-zinc-500 font-bold">
                       满分 2.0 分
@@ -1047,7 +1050,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                       compare it with every recorded answer while reviewing. */}
                   <div className="p-3 bg-rose-50/70 dark:bg-rose-950/40 border-2 border-rose-300 dark:border-rose-900/70 font-sans text-sm leading-relaxed text-zinc-900 dark:text-zinc-100">
                     <div className="font-mono text-[10px] text-swiss-red dark:text-rose-400 uppercase font-bold mb-1 flex items-center gap-1">
-                      <Quote className="w-3 h-3" /> 标准参考译文
+                      <Quote className="w-3 h-3" /> 标准{isZhEn ? '英文' : ''}参考译文
                     </div>
                     {sampleSubWithRef?.gradingResult?.reference_translation ||
                       '（本题暂无参考译文：评分服务未返回或该题评分异常）'}
@@ -1191,6 +1194,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
           spectatorCount={spectatorsList.length}
           secondsRemaining={secondsRemaining}
           roomCode={roomState.roomCode}
+          direction={roomState.direction}
           onExit={handleLeaveAndExit}
         />
 
@@ -1270,7 +1274,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                   <div className="flex items-center gap-2">
                     <span className="w-2.5 h-2.5 bg-swiss-red animate-pulse"></span>
                     <span className="font-mono text-xs font-bold uppercase tracking-wider text-swiss-black dark:text-zinc-100">
-                      本题待译长难句 [0{currentIdx + 1} / 05]
+                      {isZhEn ? '本题待译中文原句' : '本题待译长难句'} [0{currentIdx + 1} / 05]
                     </span>
                   </div>
                   <span className="font-mono text-xs font-bold text-zinc-400 dark:text-zinc-500">
@@ -1279,7 +1283,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                 </div>
 
                 {/* Target Sentence Content */}
-                <div className="p-3 sm:p-4 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-300 dark:border-zinc-700 font-serif text-sm sm:text-base md:text-lg leading-relaxed text-zinc-900 dark:text-zinc-100 selection:bg-swiss-red selection:text-white">
+                <div className={`p-3 sm:p-4 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-300 dark:border-zinc-700 ${isZhEn ? 'font-zh' : 'font-serif'} text-sm sm:text-base md:text-lg leading-relaxed text-zinc-900 dark:text-zinc-100 selection:bg-swiss-red selection:text-white`}>
                   {currentSegment}
                 </div>
 
@@ -1287,7 +1291,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between font-mono text-xs text-zinc-500 dark:text-zinc-400">
                     <label htmlFor="pvp-input" className="font-bold uppercase text-[11px]">
-                      输入您的中文翻译：
+                      {isZhEn ? '输入您的英文翻译：' : '输入您的中文翻译：'}
                     </label>
                     <span className="text-[10px] hidden sm:inline">Ctrl + Enter 快捷提交</span>
                   </div>
@@ -1302,7 +1306,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                       }
                     }}
                     rows={4}
-                    placeholder="在此输入翻译，提交后立即进入下一句..."
+                    placeholder={isZhEn ? '在此输入英文翻译，提交后立即进入下一句...' : '在此输入翻译，提交后立即进入下一句...'}
                     className="w-full border-2 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-800 p-3 font-sans text-base sm:text-sm focus:outline-none focus:border-swiss-red dark:focus:border-swiss-red transition-colors placeholder:text-zinc-400 dark:placeholder:text-zinc-500 text-swiss-black dark:text-zinc-100 resize-none leading-relaxed"
                   />
                 </div>
@@ -1428,6 +1432,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                     studentAnswer={myPlayer.submissions[activeCardTab].studentAnswer}
                     originalText={myPlayer.submissions[activeCardTab].originalText}
                     segmentIndex={activeCardTab}
+                    direction={roomState.direction}
                   />
                   {myPlayer.submissions[activeCardTab].comparativeAnalysis && (
                     <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border-2 border-amber-300 dark:border-amber-800 font-mono text-xs text-amber-950 dark:text-amber-200">
@@ -1449,7 +1454,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                   <div className="flex items-center gap-2">
                     <BookOpen className="w-4 h-4 text-zinc-600 dark:text-zinc-400" />
                     <span className="font-mono text-xs font-bold uppercase tracking-wider text-zinc-700 dark:text-zinc-200">
-                      PASSAGE CONTEXT // {roomState.year} 年考研真题
+                      {isZhEn ? 'CHINESE CONTEXT' : 'PASSAGE CONTEXT'} // {roomState.year} 年{isZhEn ? '中文语境' : '考研真题'}
                     </span>
                   </div>
                   <div className="flex items-center gap-2">

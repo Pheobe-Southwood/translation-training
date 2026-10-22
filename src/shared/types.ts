@@ -1,3 +1,5 @@
+export type TranslationDirection = 'en-zh' | 'zh-en';
+
 export interface TranslationExam {
   id: string; // e.g. "2024-translation"
   year: number; // 2024
@@ -5,6 +7,7 @@ export interface TranslationExam {
   maxScore: number; // 10
   contentMarkdown: string; // Full passage markdown
   translationSegments: string[]; // 5 sentences to translate
+  direction?: TranslationDirection;
 }
 
 export interface ScoringPointBreakdown {
@@ -71,6 +74,7 @@ export interface PlayerState {
 export interface PvpRoomSummary {
   roomCode: string;
   year: number;
+  direction?: TranslationDirection;
   durationMinutes: number;
   status: RoomStatus;
   playerCount: number;
@@ -81,6 +85,7 @@ export interface PvpRoomSummary {
 export interface PvpRoomState {
   roomCode: string;
   year: number;
+  direction: TranslationDirection;
   exam: TranslationExam;
   durationMinutes: number; // default 15
   status: RoomStatus;
@@ -106,6 +111,7 @@ export interface HistorySessionRecord {
   id: string;
   type: 'solo' | 'pvp';
   year: number;
+  direction?: TranslationDirection;
   timestamp: number;
   totalScore: number;
   timeSpentSeconds: number;
