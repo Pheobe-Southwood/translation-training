@@ -119,3 +119,80 @@ jobs:
         run: |
           if [ -f /tmp/server.pid ]; then kill "$(cat /tmp/server.pid)" 2>/dev/null || true; fi
           if [ -f /tmp/mock-deepseek.pid ]; then kill "$(cat /tmp/mock-deepseek.pid)" 2>/dev/null || true; fi
+
+  deploy:
+    name: Deploy to vrc-vps
+    needs: build-and-e2e
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: deploy-vrc-vps
+      cancel-in-progress: false
+    steps:
+      - name: Download built app
+        uses: actions/download-artifact@v4
+        with:
+          name: translation-training-dist
+          path: artifact
+
+      - name: Configure SSH
+        env:
+          VRC_VPS_SSH_KEY: ${{ secrets.VRC_VPS_SSH_KEY }}
+          VRC_VPS_KNOWN_HOSTS: ${{ secrets.VRC_VPS_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$VRC_VPS_SSH_KEY"
+          test -n "$VRC_VPS_KNOWN_HOSTS"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VRC_VPS_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$VRC_VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Upload and restart
+        env:
+          VRC_VPS_HOST: ${{ vars.VRC_VPS_HOST }}
+          VRC_VPS_USER: ${{ vars.VRC_VPS_USER }}
+        run: |
+          set -euo pipefail
+          test -n "$VRC_VPS_HOST"
+          test -n "$VRC_VPS_USER"
+          test -f artifact/server/index.js
+          test -f artifact/client/index.html
+          TS=$(date -u +%Y%m%d%H%M%S)
+          SSH_CMD="ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+          ssh_vps() { $SSH_CMD "$VRC_VPS_USER@$VRC_VPS_HOST" "$@"; }
+
+          ssh_vps 'rm -rf /var/www/translation-training/dist.new && mkdir -p /var/www/translation-training/dist.new'
+          rsync -az --delete -e "$SSH_CMD" artifact/ "$VRC_VPS_USER@$VRC_VPS_HOST:/var/www/translation-training/dist.new/"
+          ssh_vps "TS=$TS bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd /var/www/translation-training
+          cp -a dist "dist.bak.$TS"
+          mv dist "dist.old.$TS"
+          mv dist.new dist
+          systemctl restart translation-training.service
+
+          ok=0
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8888/api/health >/dev/null; then
+              ok=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$ok" != 1 ]; then
+            echo "health check failed; rolling back to the previous build"
+            rm -rf dist
+            mv "dist.old.$TS" dist
+            systemctl restart translation-training.service
+            exit 1
+          fi
+
+          rm -rf "dist.old.$TS"
+          echo "deployed $TS"
+          systemctl is-active translation-training.service
+          curl -fsS http://127.0.0.1:8888/api/health
+          REMOTE
