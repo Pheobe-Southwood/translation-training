@@ -1181,7 +1181,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
                     允许开启实时观战位 (SPECTATOR MODE)
                   </div>
                   <div className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
-                    观战者可实时查看每位选手的答题进度、所写译文与 AI 判分详情
+                    观战者可实时查看每位选手的答题进度、所写译文与判分详情
                   </div>
                 </div>
               </div>

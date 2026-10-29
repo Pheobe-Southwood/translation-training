@@ -304,7 +304,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onBack }) => {
                   <div className="border-t-2 border-swiss-black dark:border-zinc-700 p-4 sm:p-6 bg-zinc-50 dark:bg-zinc-800/40 space-y-5">
                     <div className="font-mono text-xs font-bold text-zinc-700 dark:text-zinc-300 uppercase flex items-center gap-1.5">
                       <Sparkles className="w-3.5 h-3.5 text-swiss-red" />
-                      全套 5 题作答与 AI 阅卷评定细则
+                      全套 5 题作答与程序阅卷评定细则
                     </div>
 
                     <div className="space-y-4">

@@ -208,7 +208,7 @@ export const PvpHud: React.FC<PvpHudProps> = ({
                             sub?.gradingStatus === 'waiting_pair'
                               ? '已提交，等待并列评分'
                               : sub?.gradingStatus === 'grading'
-                              ? 'AI 评分中'
+                              ? '评分中'
                               : sub?.gradingStatus === 'graded'
                               ? `已出分 +${sub.gradingResult?.score.toFixed(1)}`
                               : isCurrent

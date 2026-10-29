@@ -70,18 +70,18 @@ export const HomeView: React.FC<HomeViewProps> = ({
         </h1>
 
         <p className="text-xs md:text-sm text-zinc-600 dark:text-zinc-400 font-mono leading-relaxed max-w-3xl">
-          收录 2002–2026 全年 25 套真题长难句 · 英译中 / 中译英双向训练 · DeepSeek 严格阅卷 · 支持 2–4 人实时对战与观战大屏
+          收录 2002–2026 全年 25 套真题长难句 · 英译中 / 中译英双向训练 · 程序严格阅卷 · 支持 2–4 人实时对战与观战大屏
         </p>
       </div>
 
-      {/* Compliance notice: non-official status, sources, AI labelling, reporting */}
+      {/* Compliance notice: non-official status, sources, grading disclosure, reporting */}
       <div className="border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-4 sm:px-6 py-3 font-mono text-[11px] leading-relaxed text-zinc-600 dark:text-zinc-400">
         <span className="font-bold text-swiss-black dark:text-zinc-200">合规提示 // </span>
         本站为个人非经营性学习交流站点，与教育部、教育考试院及招生单位无隶属关系；真题与参考译文来自公开出版物和网络公开资料，仅供个人备考学习，详见
         <a href="/legal/copyright.html" className="mx-1 underline underline-offset-2 hover:text-swiss-red">
           版权与免责声明
         </a>
-        。评分与点评由 AI 生成并已显著标识，仅供参考。发现违法和不良信息请
+        。评分与点评由评分程序自动生成，仅供参考。发现违法和不良信息请
         <a href="/legal/report.html" className="mx-1 underline underline-offset-2 text-swiss-red">
           举报
         </a>
@@ -265,7 +265,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
               PVP 多人竞技与观战大屏
             </h3>
             <p className="text-xs font-mono text-zinc-600 dark:text-zinc-400 mb-5 leading-relaxed">
-              {isZhEn ? '支持 2–4 人同题中译英竞速，并开放实时观战位大屏，实时追踪全场英文作答与 AI 判分。' : '支持 2–4 人自定义房间人数同题竞速，并开放实时观战位大屏，实时追踪全场选手作答内容与 AI 判分。'}
+              {isZhEn ? '支持 2–4 人同题中译英竞速，并开放实时观战位大屏，实时追踪全场英文作答与程序判分。' : '支持 2–4 人自定义房间人数同题竞速，并开放实时观战位大屏，实时追踪全场选手作答内容与程序判分。'}
             </p>
 
             <button

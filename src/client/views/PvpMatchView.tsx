@@ -453,7 +453,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                   <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
                 </div>
                 <div className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
-                  实时同步 {allPlayers.length} 位选手的作答内容、AI 采分点明细与积分榜 · 在场观众{' '}
+                  实时同步 {allPlayers.length} 位选手的作答内容、采分点明细与积分榜 · 在场观众{' '}
                   {spectatorsList.length} 人
                 </div>
               </div>
@@ -630,7 +630,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                             )}
                             {sub.gradingStatus === 'grading' && (
                               <span className="text-amber-600 dark:text-amber-400 font-bold flex items-center gap-1">
-                                <Loader2 className="w-3 h-3 animate-spin" /> DeepSeek 正在实时批改...
+                                <Loader2 className="w-3 h-3 animate-spin" /> 程序正在实时批改...
                               </span>
                             )}
                             {sub.gradingStatus === 'graded' && (
@@ -648,7 +648,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                             <div className="space-y-2 pt-1">
                               <div className="p-2.5 bg-zinc-50/80 dark:bg-zinc-800/40 border-l-2 border-swiss-black dark:border-zinc-500 text-xs font-mono text-zinc-600 dark:text-zinc-300">
                                 <span className="font-bold text-swiss-black dark:text-zinc-100 mr-1">
-                                  [AI 评语]
+                                  [评语]
                                 </span>
                                 {sub.gradingResult.critique}
                               </div>
@@ -716,7 +716,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                                 正在作答本题 (第 {spectateSegmentIdx + 1} 题)...
                               </div>
                               <div className="text-[11px] text-zinc-400 mt-1">
-                                选手点击提交后，译文与 AI 判分将立即在此实时显示
+                                选手点击提交后，译文与判分将立即在此实时显示
                               </div>
                             </>
                           ) : (
@@ -1014,7 +1014,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                 全员逐题评定复盘与横向对比 ({allPlayers.length}人同题对照)
               </h2>
               <div className="font-mono text-xs text-zinc-500 dark:text-zinc-400 mt-1">
-                {isZhEn ? '展示每位选手在全部 5 道中文原句上的英文译文、得分与 AI 评语' : '展示每位选手在全部 5 道长难句上的翻译原文、得分、AI 评语与采分点明细'}
+                {isZhEn ? '展示每位选手在全部 5 道中文原句上的英文译文、得分与评语' : '展示每位选手在全部 5 道长难句上的翻译原文、得分、评语与采分点明细'}
               </div>
             </div>
 
@@ -1169,7 +1169,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                   {sampleSubWithComp?.comparativeAnalysis && (
                     <div className="p-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/60 font-mono text-xs text-amber-950 dark:text-amber-200">
                       <span className="font-bold text-amber-800 dark:text-amber-400 uppercase mr-2">
-                        [横向对比裁决 · AI 生成]
+                        [横向对比裁决]
                       </span>
                       {sampleSubWithComp.comparativeAnalysis}
                     </div>
@@ -1390,7 +1390,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                       <>
                         <Loader2 className="w-4 h-4 text-amber-500 animate-spin shrink-0" />
                         <span className="font-bold text-amber-700 dark:text-amber-400 text-xs">
-                          DeepSeek 正在实时评阅第 {currentIdx} 句...
+                          程序正在实时评阅第 {currentIdx} 句...
                         </span>
                       </>
                     ) : prevSub.gradingStatus === 'graded' ? (
@@ -1437,7 +1437,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                   {myPlayer.submissions[activeCardTab].comparativeAnalysis && (
                     <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border-2 border-amber-300 dark:border-amber-800 font-mono text-xs text-amber-950 dark:text-amber-200">
                       <span className="font-bold text-amber-800 dark:text-amber-400 uppercase mr-2">
-                        [双人并列评定解析 · AI 生成]
+                        [双人并列评定解析]
                       </span>
                       {myPlayer.submissions[activeCardTab].comparativeAnalysis}
                     </div>
@@ -1505,7 +1505,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
 
               <p className="font-mono text-xs text-zinc-600 dark:text-zinc-400 max-w-xl mx-auto leading-relaxed">
                 {secondsRemaining <= 0
-                  ? '比赛时间已耗尽，系统正在等待最后题目的 DeepSeek 裁决并生成终局排行榜...'
+                  ? '比赛时间已耗尽，系统正在等待最后题目的程序裁决并生成终局排行榜...'
                   : '您的作答已全部锁定提交。等待其他选手完卷期间，您可在下方实时观战全场选手的答题情况与出分进度！'}
               </p>
 
