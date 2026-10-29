@@ -53,7 +53,9 @@ class AppDatabase {
         password_salt TEXT NOT NULL,
         nickname TEXT NOT NULL,
         created_at INTEGER NOT NULL,
-        last_login_at INTEGER NOT NULL
+        last_login_at INTEGER NOT NULL,
+        terms_version TEXT,
+        terms_accepted_at INTEGER
       );
 
       CREATE TABLE IF NOT EXISTS history_records (
@@ -71,6 +73,16 @@ class AppDatabase {
 
       CREATE INDEX IF NOT EXISTS idx_history_user_time ON history_records (user_id, timestamp DESC);
     `);
+
+    // Additive migration: recorded consent to the user agreement / privacy policy.
+    const userColumns = this.db.prepare('PRAGMA table_info(users)').all() as Array<{
+      name?: string;
+    }>;
+    if (!userColumns.some((column) => column.name === 'terms_version')) {
+      this.db.exec('ALTER TABLE users ADD COLUMN terms_version TEXT');
+      this.db.exec('ALTER TABLE users ADD COLUMN terms_accepted_at INTEGER');
+      console.log('[db] Added users.terms_version / terms_accepted_at');
+    }
 
     // Additive migration for databases created before the direction column.
     const columns = this.db.prepare('PRAGMA table_info(history_records)').all() as Array<{
@@ -91,11 +103,12 @@ class AppDatabase {
     passwordHash: string;
     passwordSalt: string;
     nickname: string;
+    termsVersion?: string;
   }): UserRow {
     const now = Date.now();
     const stmt = this.db.prepare(`
-      INSERT INTO users (id, username, password_hash, password_salt, nickname, created_at, last_login_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO users (id, username, password_hash, password_salt, nickname, created_at, last_login_at, terms_version, terms_accepted_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       user.id,
@@ -104,7 +117,9 @@ class AppDatabase {
       user.passwordSalt,
       user.nickname.trim(),
       now,
-      now
+      now,
+      user.termsVersion || null,
+      user.termsVersion ? now : null
     );
 
     return {
@@ -146,6 +161,29 @@ class AppDatabase {
       UPDATE users SET nickname = ? WHERE id = ?
     `);
     stmt.run(nickname.trim(), userId);
+  }
+
+  /** Irreversible account deletion; history rows cascade via the foreign key. */
+  public deleteUser(userId: string): boolean {
+    const stmt = this.db.prepare('DELETE FROM users WHERE id = ?');
+    const result = stmt.run(userId) as { changes?: number };
+    return (result.changes || 0) > 0;
+  }
+
+  /** Everything the operator holds about one account, for a data-access request. */
+  public exportUser(userId: string) {
+    const user = this.getUserById(userId);
+    if (!user) return null;
+    return {
+      profile: {
+        id: user.id,
+        username: user.username,
+        nickname: user.nickname,
+        createdAt: user.created_at,
+        lastLoginAt: user.last_login_at,
+      },
+      history: this.getUserHistory(userId, 1000),
+    };
   }
 
   // --- History Records Operations ---

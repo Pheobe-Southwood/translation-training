@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import type { AuthUser, PvpRoomState, TranslationDirection } from '../shared/types.js';
 import { SwissHeader } from './components/SwissHeader.js';
+import { SiteFooter } from './components/SiteFooter.js';
 import { PasswordGate } from './components/PasswordGate.js';
 import { HomeView } from './views/HomeView.js';
 import { SoloView } from './views/SoloView.js';
@@ -258,6 +259,10 @@ export const App: React.FC = () => {
       )}
 
       <main className="flex-1 pb-safe">
+        {/* Never mount authenticated views (or their API calls) behind the gate. */}
+        {(isAuthenticated === true || isSpectateMode) && (
+          <>
+
         {currentView === 'home' && (
           <HomeView
             direction={direction}
@@ -303,24 +308,11 @@ export const App: React.FC = () => {
         {currentView === 'history' && (
           <HistoryView onBack={() => setCurrentView('home')} />
         )}
+          </>
+        )}
       </main>
 
-      {/* Swiss Minimalist Footer */}
-      {currentView !== 'pvp-match' && (
-        <footer className="border-t-2 border-swiss-black dark:border-zinc-800 bg-white dark:bg-zinc-900 py-6 mt-16 font-mono text-xs text-zinc-500 dark:text-zinc-400">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-wrap items-center justify-between gap-4">
-            <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 bg-swiss-red"></span>
-              <span className="font-bold text-swiss-black dark:text-zinc-100 uppercase">
-                TRANSLATION TRAINING // 2002–2026
-              </span>
-            </div>
-            <div>
-              SWISS DESIGN SYSTEM · DEEPSEEK HIGH REASONING · REFERENCE ANSWERS: PUBLIC EXAM KEYS
-            </div>
-          </div>
-        </footer>
-      )}
+      <SiteFooter />
     </div>
   );
 };

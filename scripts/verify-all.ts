@@ -60,6 +60,7 @@ async function runTests() {
         username,
         password: 'Password123!',
         invitationCode: 'tt8888',
+        agreedTerms: true,
         nickname: '验证用户',
       }),
     });

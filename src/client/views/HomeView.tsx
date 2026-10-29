@@ -74,6 +74,20 @@ export const HomeView: React.FC<HomeViewProps> = ({
         </p>
       </div>
 
+      {/* Compliance notice: non-official status, sources, AI labelling, reporting */}
+      <div className="border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-4 sm:px-6 py-3 font-mono text-[11px] leading-relaxed text-zinc-600 dark:text-zinc-400">
+        <span className="font-bold text-swiss-black dark:text-zinc-200">合规提示 // </span>
+        本站为个人非经营性学习交流站点，与教育部、教育考试院及招生单位无隶属关系；真题与参考译文来自公开出版物和网络公开资料，仅供个人备考学习，详见
+        <a href="/legal/copyright.html" className="mx-1 underline underline-offset-2 hover:text-swiss-red">
+          版权与免责声明
+        </a>
+        。评分与点评由 AI 生成并已显著标识，仅供参考。发现违法和不良信息请
+        <a href="/legal/report.html" className="mx-1 underline underline-offset-2 text-swiss-red">
+          举报
+        </a>
+        。
+      </div>
+
       {/* Translation Direction Route Board */}
       <div className="border-2 sm:border-4 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-900 shadow-[6px_6px_0px_0px_#09090b] dark:shadow-[6px_6px_0px_0px_#000000]">
         <div className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-3 border-b-2 border-swiss-black dark:border-zinc-700">

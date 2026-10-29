@@ -29,6 +29,9 @@ export const GradingCard: React.FC<GradingCardProps> = ({
           <span className="font-mono text-xs uppercase text-zinc-500 dark:text-zinc-400 font-semibold tracking-wider">
             AI 阅卷评定
           </span>
+          <span className="border border-swiss-red text-swiss-red font-mono text-[9px] font-black px-1.5 py-0.5 uppercase tracking-wider">
+            AI 生成
+          </span>
         </div>
 
         {/* Score Badge */}
@@ -155,6 +158,9 @@ export const GradingCard: React.FC<GradingCardProps> = ({
         </div>
         <p className="text-zinc-200 dark:text-zinc-300 leading-relaxed text-[11px]">
           {result.critique}
+        </p>
+        <p className="mt-2 pt-2 border-t border-zinc-700/60 text-[10px] text-zinc-400 leading-relaxed">
+          本评分、采分点与点评均由人工智能模型自动生成，仅供学习参考，不代表官方阅卷结论。
         </p>
       </div>
     </div>

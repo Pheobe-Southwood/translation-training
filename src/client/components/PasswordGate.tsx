@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Lock, ArrowRight, ShieldCheck, User, KeyRound, Sparkles } from 'lucide-react';
 import type { AuthUser } from '../../shared/types.js';
 import { setAuthToken, setStoredUser } from '../utils/storage.js';
+import { getSiteInfo, LEGAL_LINKS } from '../../shared/site.js';
 
 interface PasswordGateProps {
   onSuccess: (user: AuthUser) => void;
@@ -16,6 +17,8 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
   const [error, setError] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [agreed, setAgreed] = useState(false);
+  const site = getSiteInfo();
 
   const usernameInputRef = useRef<HTMLInputElement>(null);
   const invitationInputRef = useRef<HTMLInputElement>(null);
@@ -89,6 +92,10 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
       setError('请输入系统邀请码以激活账号');
       return;
     }
+    if (!agreed) {
+      setError('请先阅读并同意《用户协议》和《隐私政策》');
+      return;
+    }
 
     setLoading(true);
     setError(null);
@@ -102,6 +109,7 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
           password,
           invitationCode: invitationCode.trim(),
           nickname: nickname.trim() || username.trim(),
+          agreedTerms: true,
         }),
       });
 
@@ -137,7 +145,7 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
             </span>
           </div>
           <span className="px-2 py-0.5 bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 font-mono text-[10px] text-zinc-600 dark:text-zinc-400">
-            PORT:8888
+            邀请制 · 非经营性
           </span>
         </div>
 
@@ -314,9 +322,40 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
               </div>
             )}
 
+            <label className="flex items-start gap-2 text-[11px] leading-relaxed text-zinc-600 dark:text-zinc-400 font-mono cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={agreed}
+                onChange={(e) => setAgreed(e.target.checked)}
+                className="mt-0.5 h-4 w-4 shrink-0 accent-[#E11D48]"
+                aria-required="true"
+              />
+              <span>
+                我已年满 18 周岁，并已阅读、同意
+                <a
+                  href="/legal/terms.html"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mx-1 underline underline-offset-2 text-swiss-red"
+                >
+                  《用户协议》
+                </a>
+                与
+                <a
+                  href="/legal/privacy.html"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mx-1 underline underline-offset-2 text-swiss-red"
+                >
+                  《隐私政策》
+                </a>
+                ，知悉评分由 AI 生成、仅供参考。
+              </span>
+            </label>
+
             <button
               type="submit"
-              disabled={loading}
+              disabled={loading || !agreed}
               className="w-full min-h-[44px] py-3 bg-swiss-red hover:bg-rose-700 text-white font-mono text-xs font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-2 disabled:opacity-50 active:scale-[0.99]"
             >
               {loading ? (
@@ -329,17 +368,45 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
               )}
             </button>
             <p className="text-[11px] font-mono text-zinc-500 dark:text-zinc-400 text-center">
-              无有效邀请码无法激活，以此杜绝未经许可的额度消耗
+              无有效邀请码无法激活；邀请码仅用于控制 AI 评分额度，请勿公开传播
             </p>
           </form>
         )}
 
         {/* Footer info */}
-        <div className="mt-6 pt-4 border-t border-zinc-200 dark:border-zinc-800 flex items-center justify-between text-[10px] text-zinc-500 dark:text-zinc-400 font-mono">
-          <span className="flex items-center gap-1">
-            <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" /> 线上数据持久加密
-          </span>
-          <span>DEEPSEEK HIGH REASONING</span>
+        <div className="mt-6 pt-4 border-t border-zinc-200 dark:border-zinc-800 space-y-2 text-[10px] text-zinc-500 dark:text-zinc-400 font-mono">
+          <div className="flex items-center justify-between gap-2">
+            <span className="flex items-center gap-1">
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" /> 密码加盐哈希存储 · 评分由 AI 生成
+            </span>
+            <span>DEEPSEEK</span>
+          </div>
+          <nav className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 pt-1">
+            {LEGAL_LINKS.map((link) => (
+              <a
+                key={link.href}
+                href={link.href}
+                className="underline decoration-zinc-300 dark:decoration-zinc-700 underline-offset-2 hover:text-swiss-red"
+              >
+                {link.label}
+              </a>
+            ))}
+          </nav>
+          <div className="text-center pt-1">
+            {site.icpNumber ? (
+              <a
+                href={site.icpUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="hover:text-swiss-red"
+              >
+                {site.icpNumber}
+              </a>
+            ) : (
+              <span className="text-amber-600 dark:text-amber-400">ICP备案号待配置</span>
+            )}
+            {site.psbNumber ? <span className="ml-3">{site.psbNumber}</span> : null}
+          </div>
         </div>
       </div>
     </div>
