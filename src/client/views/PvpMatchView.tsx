@@ -1169,7 +1169,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                   {sampleSubWithComp?.comparativeAnalysis && (
                     <div className="p-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/60 font-mono text-xs text-amber-950 dark:text-amber-200">
                       <span className="font-bold text-amber-800 dark:text-amber-400 uppercase mr-2">
-                        [横向对比裁决]
+                        [横向对比裁决 · AI 生成]
                       </span>
                       {sampleSubWithComp.comparativeAnalysis}
                     </div>
@@ -1437,7 +1437,7 @@ export const PvpMatchView: React.FC<PvpMatchViewProps> = ({
                   {myPlayer.submissions[activeCardTab].comparativeAnalysis && (
                     <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border-2 border-amber-300 dark:border-amber-800 font-mono text-xs text-amber-950 dark:text-amber-200">
                       <span className="font-bold text-amber-800 dark:text-amber-400 uppercase mr-2">
-                        [双人并列评定解析]
+                        [双人并列评定解析 · AI 生成]
                       </span>
                       {myPlayer.submissions[activeCardTab].comparativeAnalysis}
                     </div>

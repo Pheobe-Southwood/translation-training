@@ -14,6 +14,19 @@ import { generateSpectateTicket } from './auth.js';
 import { CONFIG } from './config.js';
 import { db } from './db.js';
 import { DEFAULT_DIRECTION, parseDirection } from '../shared/direction.js';
+import { checkNickname } from './moderation.js';
+
+/**
+ * Nicknames arrive from the client on every create/join/reconnect message, so the
+ * socket layer must moderate them too — otherwise a crafted payload could broadcast
+ * an obscene or impersonating name to every player in the room.
+ */
+function safeNickname(raw: unknown, fallback: string): string {
+  if (typeof raw !== 'string') return fallback;
+  const check = checkNickname(raw.slice(0, 40));
+  if (!check.ok || !check.value) return fallback;
+  return Array.from(check.value).slice(0, 16).join('');
+}
 
 /**
  * A single live websocket.
@@ -128,7 +141,7 @@ class PvpManager {
       connId: `${playerId}#${++this.connSeq}`,
       ws,
       playerId,
-      nickname: nickname ? nickname.trim().slice(0, 16) : undefined,
+      nickname: nickname ? safeNickname(nickname, '观众') : undefined,
       role,
       spectatorOnly,
     };
@@ -335,14 +348,15 @@ class PvpManager {
     const existing = room.spectators[playerId];
     if (existing) {
       existing.isOnline = true;
-      if (nickname && nickname.trim()) existing.nickname = nickname.trim().slice(0, 16);
+      if (nickname && nickname.trim()) existing.nickname = safeNickname(nickname, existing.nickname);
       return existing;
     }
     const seat: SpectatorState = {
       playerId,
-      nickname: (nickname && nickname.trim() ? nickname : `观众${Object.keys(room.spectators).length + 1}`)
-        .trim()
-        .slice(0, 16),
+      nickname: safeNickname(
+        nickname,
+        `观众${Object.keys(room.spectators).length + 1}`
+      ),
       isOnline: true,
       isAnonymous: anonymous,
       joinedAt: Date.now(),
@@ -419,7 +433,7 @@ class PvpManager {
 
     const hostPlayer: PlayerState = {
       playerId,
-      nickname: (payload.nickname || '玩家1').trim().slice(0, 16),
+      nickname: safeNickname(payload.nickname, '玩家1'),
       isHost: true,
       isReady: false,
       isOnline: true,
@@ -450,7 +464,7 @@ class PvpManager {
     this.rooms.set(code, roomState);
     client.roomCode = code;
     client.role = 'player';
-    if (payload.nickname) client.nickname = payload.nickname.trim().slice(0, 16);
+    if (payload.nickname) client.nickname = safeNickname(payload.nickname, client.nickname || '玩家');
 
     // Leave any abandoned lobby behind so it can never broadcast into this room's
     // live connections later.
@@ -481,7 +495,7 @@ class PvpManager {
       );
     }
 
-    if (payload.nickname) client.nickname = payload.nickname.trim().slice(0, 16);
+    if (payload.nickname) client.nickname = safeNickname(payload.nickname, client.nickname || '玩家');
 
     // Ticket connections are locked to their own room and to the spectator role.
     if (client.spectatorOnly) {
@@ -497,7 +511,7 @@ class PvpManager {
     if (existingPlayer) {
       existingPlayer.isOnline = true;
       existingPlayer.lastActiveAt = Date.now();
-      if (payload.nickname) existingPlayer.nickname = payload.nickname.trim().slice(0, 16);
+      if (payload.nickname) existingPlayer.nickname = safeNickname(payload.nickname, existingPlayer.nickname);
       client.roomCode = code;
       client.role = 'player';
       this.detachFromOtherRooms(playerId, code, { asPlayer: true });
@@ -556,7 +570,7 @@ class PvpManager {
     if (wasSpectator) delete room.spectators[playerId];
 
     const playerNumber = currentPlayerCount + 1;
-    const nickname = (payload.nickname || `玩家${playerNumber}`).trim().slice(0, 16);
+    const nickname = safeNickname(payload.nickname, `玩家${playerNumber}`);
     room.players[playerId] = {
       playerId,
       nickname,
@@ -598,7 +612,7 @@ class PvpManager {
     seat.isOnline = true;
     client.roomCode = room.roomCode;
     client.role = 'spectator';
-    if (nickname && nickname.trim()) client.nickname = nickname.trim().slice(0, 16);
+    if (nickname && nickname.trim()) client.nickname = safeNickname(nickname, client.nickname || '观众');
 
     console.log(
       `[PVP] ${anonymous ? 'Link spectator' : 'Spectator'} "${seat.nickname}" (${client.playerId}) watching room ${room.roomCode}`

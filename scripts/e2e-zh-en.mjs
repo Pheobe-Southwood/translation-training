@@ -54,6 +54,7 @@ async function register(suffix) {
       username,
       password,
       invitationCode: INVITE,
+      agreedTerms: true,
       nickname: `E2E-${suffix.slice(-4)}`,
     }),
   });

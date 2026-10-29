@@ -9,9 +9,18 @@ import {
   Clock,
   Sparkles,
   Loader2,
+  Download,
+  UserX,
+  ShieldCheck,
 } from 'lucide-react';
 import type { HistorySessionRecord } from '../../shared/types.js';
-import { getAuthToken, getLocalHistory, setLocalHistory, clearHistory } from '../utils/storage.js';
+import {
+  getAuthToken,
+  getLocalHistory,
+  setLocalHistory,
+  clearHistory,
+  removeAuthToken,
+} from '../utils/storage.js';
 import { GradingCard } from '../components/GradingCard.js';
 import { directionLabel, directionShort } from '../../shared/direction.js';
 
@@ -65,6 +74,70 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onBack }) => {
       }
       clearHistory();
       setRecords([]);
+    }
+  };
+
+  /** PIPL art. 45: download a machine-readable copy of all stored account data. */
+  const handleExportData = async () => {
+    const token = getAuthToken();
+    if (!token) {
+      alert('请先登录后再导出数据');
+      return;
+    }
+    try {
+      const res = await fetch('/api/user/export', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'translation-training-account.json';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Failed to export account data:', err);
+      alert('导出失败，请稍后重试或通过页面底部邮箱联系我们。');
+    }
+  };
+
+  /** PIPL art. 47: irreversible account deletion after password re-authentication. */
+  const handleDeleteAccount = async () => {
+    if (
+      !confirm(
+        '注销账号将永久删除你的账号、昵称与全部练习/对战记录，且无法恢复。\n\n确定继续吗？'
+      )
+    ) {
+      return;
+    }
+    const password = prompt('请输入当前账号的登录密码以确认注销：');
+    if (!password) return;
+
+    try {
+      const res = await fetch('/api/user/account', {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${getAuthToken()}`,
+        },
+        body: JSON.stringify({ password }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(data.error || '注销失败，请检查密码后重试');
+        return;
+      }
+      removeAuthToken();
+      clearHistory();
+      alert('账号已注销，所有关联记录已删除。');
+      window.location.hash = '';
+      window.location.reload();
+    } catch (err) {
+      console.error('Failed to delete account:', err);
+      alert('网络错误，注销未完成，请稍后重试。');
     }
   };
 
@@ -256,6 +329,38 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onBack }) => {
           })}
         </div>
       )}
+
+      {/* Account & data controls — required by the privacy policy and PIPL. */}
+      <section className="border-2 border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 p-4 sm:p-6 space-y-3">
+        <div className="flex items-center gap-2 font-mono text-xs font-bold uppercase tracking-widest text-zinc-600 dark:text-zinc-300">
+          <ShieldCheck className="w-4 h-4 text-emerald-600" />
+          账号与个人数据
+        </div>
+        <p className="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed font-mono">
+          你可以随时导出或删除自己的数据。导出文件包含账号资料与全部练习记录；
+          注销后账号与记录将在 30 日内从备份中清除。依据
+          <a href="/legal/privacy.html" target="_blank" rel="noopener noreferrer" className="mx-1 underline underline-offset-2">
+            《隐私政策》
+          </a>
+          行使查阅、复制、删除与注销权利。
+        </p>
+        <div className="flex flex-wrap gap-2 pt-1">
+          <button
+            onClick={handleExportData}
+            className="flex items-center gap-1.5 px-3 py-2 border border-zinc-300 dark:border-zinc-700 hover:border-swiss-black dark:hover:border-zinc-400 font-mono text-xs font-bold transition-colors bg-zinc-50 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-200"
+          >
+            <Download className="w-3.5 h-3.5" />
+            导出我的数据
+          </button>
+          <button
+            onClick={handleDeleteAccount}
+            className="flex items-center gap-1.5 px-3 py-2 border border-red-200 dark:border-red-900 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 font-mono text-xs font-bold transition-colors bg-white dark:bg-zinc-900"
+          >
+            <UserX className="w-3.5 h-3.5" />
+            注销账号
+          </button>
+        </div>
+      </section>
     </div>
   );
 };

@@ -52,6 +52,7 @@ async function testPvpTimeout() {
           username,
           password: 'Password123!',
           invitationCode: 'tt8888',
+          agreedTerms: true,
           nickname,
         }),
       });

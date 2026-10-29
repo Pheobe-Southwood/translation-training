@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import path from 'path';
+import crypto from 'crypto';
 
 dotenv.config();
 
@@ -42,4 +43,37 @@ export const CONFIG = {
   /** Grace period after the last in-flight grading call before a match is force-closed. */
   pvpGradingGuardrailMs: DEEPSEEK_REQUEST_TIMEOUT_MS + 30_000,
   staticDir: path.resolve(process.cwd(), 'dist/client'),
+  /** Public origin(s) allowed to call the API from a browser. Same-origin needs none. */
+  allowedOrigins: (process.env.CORS_ORIGINS || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean),
+  /**
+   * HMAC secret for login and spectate tokens. Set AUTH_SECRET in production so
+   * tokens survive restarts; the derived fallback only exists for local dev.
+   */
+  authSecret:
+    (process.env.AUTH_SECRET || '').trim() ||
+    crypto
+      .createHash('sha256')
+      .update(`translation-training:${process.env.SITE_PASSWORD || 'dev'}:token-v2`)
+      .digest('hex'),
+  /** Minimum password length for new registrations (existing accounts unaffected). */
+  passwordMinLength: 8,
+  /** Current user-agreement / privacy-policy version recorded on registration. */
+  termsVersion: process.env.TERMS_VERSION || '2026-10-29',
+  /** Trust X-Forwarded-* from the local nginx reverse proxy. */
+  trustProxy: process.env.TRUST_PROXY === 'false' ? false : true,
+  site: {
+    name: (process.env.SITE_NAME || '翻译训练 · 考研英语翻译竞技场').trim(),
+    /** Website ICP filing number — kept out of git, injected at runtime. */
+    icpNumber: (process.env.SITE_ICP_NUMBER || '').trim(),
+    icpUrl: (process.env.SITE_ICP_URL || 'https://beian.miit.gov.cn/').trim(),
+    psbNumber: (process.env.SITE_PSB_NUMBER || '').trim(),
+    psbCode: (process.env.SITE_PSB_CODE || '').trim(),
+    operator: (process.env.SITE_OPERATOR || '').trim(),
+    contactEmail: (process.env.SITE_CONTACT_EMAIL || '').trim(),
+    policyUpdatedAt: (process.env.SITE_POLICY_UPDATED_AT || '2026-10-29').trim(),
+    termsVersion: (process.env.TERMS_VERSION || '2026-10-29').trim(),
+  },
 };

@@ -1,8 +1,6 @@
 import crypto from 'crypto';
 import { CONFIG } from './config.js';
 
-const SECRET_SALT = 'swiss-translation-training-auth-salt-v2';
-
 export function hashPassword(password: string): { salt: string; hash: string } {
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto.scryptSync(password, salt, 64).toString('hex');
@@ -29,7 +27,7 @@ export function verifyInvitationCode(code: string | undefined): boolean {
 export function generateUserToken(userId: string): string {
   const expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000; // 30 days
   const data = `${userId}:${expiresAt}`;
-  const hmac = crypto.createHmac('sha256', SECRET_SALT).update(data).digest('hex');
+  const hmac = crypto.createHmac('sha256', CONFIG.authSecret).update(data).digest('hex');
   return Buffer.from(`${userId}:${expiresAt}:${hmac}`).toString('base64');
 }
 
@@ -46,7 +44,7 @@ export function verifyUserToken(token: string | undefined): { userId: string } |
     }
 
     const data = `${userId}:${expiresAt}`;
-    const expectedHmac = crypto.createHmac('sha256', SECRET_SALT).update(data).digest('hex');
+    const expectedHmac = crypto.createHmac('sha256', CONFIG.authSecret).update(data).digest('hex');
     if (!crypto.timingSafeEqual(Buffer.from(hmac), Buffer.from(expectedHmac))) {
       return null;
     }
@@ -70,7 +68,7 @@ export function generateSpectateTicket(roomCode: string, ttlMs = 24 * 60 * 60 * 
   const code = roomCode.toUpperCase().trim();
   const expiresAt = Date.now() + ttlMs;
   const hmac = crypto
-    .createHmac('sha256', SECRET_SALT)
+    .createHmac('sha256', CONFIG.authSecret)
     .update(`spectate:${code}:${expiresAt}`)
     .digest('hex');
   return Buffer.from(`${code}:${expiresAt}:${hmac}`).toString('base64url');
@@ -87,7 +85,7 @@ export function verifySpectateTicket(ticket: string | undefined): { roomCode: st
     if (isNaN(expiresAt) || expiresAt < Date.now()) return null;
 
     const expectedHmac = crypto
-      .createHmac('sha256', SECRET_SALT)
+      .createHmac('sha256', CONFIG.authSecret)
       .update(`spectate:${roomCode}:${expiresAt}`)
       .digest('hex');
     if (!timingSafeStringEqual(hmac, expectedHmac)) return null;
