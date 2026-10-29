@@ -376,7 +376,7 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, direction, onBack }) =
                     <>
                       <Loader2 className="w-4 h-4 text-amber-500 animate-spin shrink-0" />
                       <span className="font-bold text-amber-700 dark:text-amber-400 text-xs">
-                        DeepSeek 正在阅卷上一句（第 {currentIdx} 题）...
+                        程序正在评阅上一句（第 {currentIdx} 题）...
                       </span>
                     </>
                   ) : submissions[currentIdx - 1].gradingStatus === 'graded' ? (
@@ -484,7 +484,7 @@ export const SoloView: React.FC<SoloViewProps> = ({ year, direction, onBack }) =
             {!allGradingDone && (
               <div className="flex items-center justify-center gap-2 font-mono text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/50 py-2 border border-amber-300 dark:border-amber-800 max-w-md mx-auto">
                 <Loader2 className="w-4 h-4 animate-spin text-amber-600 dark:text-amber-400" />
-                DeepSeek 正在完成最终几道题的严格阅卷，分数自动汇总中...
+                程序正在完成最终几道题的严格评阅，分数自动汇总中...
               </div>
             )}
 

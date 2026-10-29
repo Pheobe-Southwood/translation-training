@@ -33,7 +33,7 @@ export const SiteFooter: React.FC = () => {
         </p>
 
         <p className="max-w-3xl text-zinc-500 dark:text-zinc-400">
-          站内评分、采分点与点评均由人工智能模型自动生成并已作显著标识，仅供参考，不构成官方阅卷结论。
+          站内评分、采分点与点评均由评分程序自动生成，仅供参考，不构成官方阅卷结论。
         </p>
 
         <nav

@@ -620,19 +620,15 @@ async function main() {
         direction: gradingDirection,
         referenceAnswer: material.referenceAnswer || undefined,
       });
-      // Explicit AI labelling at the transport layer as well as in the UI.
-      reply.header('X-AI-Generated', 'true').header('X-AI-Model', 'deepseek');
       return {
         success: true,
         segmentIndex,
         direction: gradingDirection,
         gradingResult,
-        aiGenerated: true,
-        aiNotice: '评分与点评由人工智能模型自动生成，仅供学习参考。',
       };
     } catch (err: any) {
       req.log.error(err, 'Failed to grade translation via DeepSeek');
-      return reply.status(500).send({ error: err.message || 'DeepSeek 评分失败' });
+      return reply.status(500).send({ error: '评分服务暂时不可用，请稍后重试' });
     }
   });
 

@@ -132,7 +132,7 @@ async function submitSoloFive(page, { direction, answers }) {
   }
   await waitText(page, '全卷逐句评分与阅卷点评回看', GRADING_TIMEOUT);
   await page.waitForFunction(
-    () => (document.body.innerText.match(/AI 阅卷评定/g) || []).length >= 5,
+    () => (document.body.innerText.match(/程序阅卷评定/g) || []).length >= 5,
     null,
     { timeout: GRADING_TIMEOUT }
   );

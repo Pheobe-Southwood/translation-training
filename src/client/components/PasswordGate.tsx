@@ -349,7 +349,7 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
                 >
                   《隐私政策》
                 </a>
-                ，知悉评分由 AI 生成、仅供参考。
+                ，知悉评分由程序自动生成、仅供参考。
               </span>
             </label>
 
@@ -368,7 +368,7 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
               )}
             </button>
             <p className="text-[11px] font-mono text-zinc-500 dark:text-zinc-400 text-center">
-              无有效邀请码无法激活；邀请码仅用于控制 AI 评分额度，请勿公开传播
+              无有效邀请码无法激活；邀请码仅用于控制评分额度，请勿公开传播
             </p>
           </form>
         )}
@@ -377,9 +377,9 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
         <div className="mt-6 pt-4 border-t border-zinc-200 dark:border-zinc-800 space-y-2 text-[10px] text-zinc-500 dark:text-zinc-400 font-mono">
           <div className="flex items-center justify-between gap-2">
             <span className="flex items-center gap-1">
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" /> 密码加盐哈希存储 · 评分由 AI 生成
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" /> 密码加盐哈希存储 · 程序自动评分
             </span>
-            <span>DEEPSEEK</span>
+            <span>AUTO GRADING</span>
           </div>
           <nav className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 pt-1">
             {LEGAL_LINKS.map((link) => (
