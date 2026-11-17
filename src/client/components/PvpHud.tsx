@@ -11,6 +11,8 @@ interface PvpHudProps {
   secondsRemaining: number;
   roomCode: string;
   direction?: TranslationDirection;
+  /** Number of target sentences in the room's paper (3–5), for the progress dots. */
+  segmentCount?: number;
   onExit?: () => void;
 }
 
@@ -22,6 +24,7 @@ export const PvpHud: React.FC<PvpHudProps> = ({
   secondsRemaining,
   roomCode,
   direction = 'en-zh',
+  segmentCount = 5,
   onExit,
 }) => {
   const formatTime = (seconds: number) => {
@@ -194,9 +197,9 @@ export const PvpHud: React.FC<PvpHudProps> = ({
                     )}
                   </div>
 
-                  {/* 5 Segment Indicator Dots */}
+                  {/* Segment Indicator Dots: one per sentence in the paper (3–5) */}
                   <div className="flex items-center gap-0.5 sm:gap-1 mt-1">
-                    {[0, 1, 2, 3, 4].map((idx) => {
+                    {Array.from({ length: segmentCount }, (_, idx) => {
                       const sub = player.submissions[idx];
                       const isCurrent =
                         player.currentSegmentIndex === idx && !player.isFinished;

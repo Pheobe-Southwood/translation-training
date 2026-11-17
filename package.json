@@ -7,14 +7,16 @@
     "dev": "vite",
     "dev:server": "tsx watch src/server/index.ts",
     "build:client": "NODE_ENV=production vite build --mode production",
-    "build:server": "tsc -p tsconfig.server.json && mkdir -p dist/shared/data && cp src/shared/data/exams.json dist/shared/data/",
+    "build:server": "tsc -p tsconfig.server.json && mkdir -p dist/shared/data && cp src/shared/data/exams.json dist/shared/data/ && cp src/shared/data/passage-bank.json dist/shared/data/",
     "build": "pnpm build:client && pnpm build:server",
     "start": "node dist/server/index.js",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit",
     "validate:data": "tsx scripts/validate-bilingual-bank.ts",
-    "test:e2e": "node scripts/e2e-zh-en.mjs",
-    "research:reference": "node scripts/research-reference-bank.mjs"
+    "test:e2e": "node scripts/e2e-zh-en.mjs && node scripts/e2e-passage-bank.mjs",
+    "research:reference": "node scripts/research-reference-bank.mjs",
+    "validate:passage-bank": "tsx scripts/validate-passage-bank.ts",
+    "build:passage-bank": "node scripts/build-passage-bank.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

@@ -8,7 +8,7 @@ import type {
   SegmentSubmission,
   HistorySessionRecord,
 } from '../shared/types.js';
-import { getExamByYear, getGradingMaterial, getRandomExam } from './examService.js';
+import { getExamById, getExamByYear, getGradingMaterial, getRandomExam } from './examService.js';
 import { gradeTranslation, gradePvpPairTranslation } from './deepseek.js';
 import { generateSpectateTicket } from './auth.js';
 import { CONFIG } from './config.js';
@@ -187,6 +187,8 @@ class PvpManager {
         this.joinRoom(client, payload);
         break;
       case 'room:update_settings':
+      // Older/newer clients have used both names for the same host-only action.
+      case 'room:update_config':
         this.updateRoomSettings(client, payload);
         break;
       case 'room:toggle_ready':
@@ -383,6 +385,7 @@ class PvpManager {
     client: ConnectedClient,
     payload: {
       nickname: string;
+      examId?: string;
       year?: number;
       durationMinutes?: number;
       maxPlayers?: number;
@@ -424,7 +427,21 @@ class PvpManager {
     }
 
     let exam: TranslationExam | undefined;
-    if (payload.year) {
+    const requestedExamId =
+      typeof payload.examId === 'string' && payload.examId.trim() ? payload.examId.trim() : undefined;
+    if (requestedExamId) {
+      // An explicitly chosen paper must exist; silently substituting a random one
+      // would put the room on a paper nobody selected.
+      exam = getExamById(requestedExamId, direction);
+      if (!exam) {
+        return this.sendError(
+          client,
+          `未找到题库卷 ${requestedExamId}（${direction}）`,
+          'EXAM_NOT_FOUND'
+        );
+      }
+    } else if (payload.year) {
+      // Legacy payload: a bare year means the translation paper of that year.
       exam = getExamByYear(payload.year, direction);
     }
     if (!exam) {
@@ -447,6 +464,9 @@ class PvpManager {
     const roomState: PvpRoomState = {
       roomCode: code,
       year: exam.year,
+      examId: exam.examId,
+      bank: exam.bank,
+      partLabel: exam.partLabel,
       direction,
       exam,
       durationMinutes: duration,
@@ -471,7 +491,7 @@ class PvpManager {
     this.detachFromOtherRooms(playerId, code, { asPlayer: true });
 
     console.log(
-      `[PVP] Created room ${code} (maxPlayers=${maxPlayers}, spectators=${allowSpectators}, direction=${direction}) by ${hostPlayer.nickname} (${playerId}), Year: ${exam.year}`
+      `[PVP] Created room ${code} (maxPlayers=${maxPlayers}, spectators=${allowSpectators}, direction=${direction}) by ${hostPlayer.nickname} (${playerId}), Exam: ${exam.examId}, Year: ${exam.year}`
     );
     this.broadcastRoomState(code);
   }
@@ -730,6 +750,7 @@ class PvpManager {
   private updateRoomSettings(
     client: ConnectedClient,
     payload: {
+      examId?: string;
       year?: number;
       durationMinutes?: number;
       maxPlayers?: number;
@@ -759,14 +780,34 @@ class PvpManager {
       nextDirection = parsed;
     }
 
-    if (payload.year || nextDirection !== room.direction) {
-      const targetYear = payload.year || room.year;
-      const exam = getExamByYear(targetYear, nextDirection);
-      if (!exam) {
-        return this.sendError(client, '该年份暂无对应方向的题库，请换一套', 'EXAM_NOT_FOUND');
+    const requestedExamId =
+      typeof payload.examId === 'string' && payload.examId.trim() ? payload.examId.trim() : undefined;
+
+    if (requestedExamId || payload.year || nextDirection !== room.direction) {
+      let exam: TranslationExam | undefined;
+      if (requestedExamId) {
+        exam = getExamById(requestedExamId, nextDirection);
+        if (!exam) {
+          return this.sendError(
+            client,
+            `未找到题库卷 ${requestedExamId}（${nextDirection}）`,
+            'EXAM_NOT_FOUND'
+          );
+        }
+      } else {
+        // Legacy year payloads mean the translation paper; a direction-only change
+        // stays on the paper already selected in the room.
+        const targetExamId = payload.year ? `${payload.year}-translation` : room.examId;
+        exam = getExamById(targetExamId, nextDirection);
+        if (!exam) {
+          return this.sendError(client, '该年份暂无对应方向的题库，请换一套', 'EXAM_NOT_FOUND');
+        }
       }
-      examChanged = exam.year !== room.year || nextDirection !== room.direction;
+      examChanged = exam.examId !== room.examId || nextDirection !== room.direction;
       room.year = exam.year;
+      room.examId = exam.examId;
+      room.bank = exam.bank;
+      room.partLabel = exam.partLabel;
       room.direction = nextDirection;
       room.exam = exam;
     }
@@ -898,6 +939,7 @@ class PvpManager {
     }
 
     const playerList = Object.values(room.players);
+    const segmentCount = room.exam.translationSegments.length;
     // 1. Lock all players from submitting further answers
     for (const p of playerList) {
       p.isFinished = true;
@@ -910,7 +952,7 @@ class PvpManager {
       const p1 = playerList[0];
       const p2 = playerList[1];
 
-      for (let idx = 0; idx < 5; idx++) {
+      for (let idx = 0; idx < segmentCount; idx++) {
         const sub1 = p1.submissions[idx];
         const sub2 = p2.submissions[idx];
 
@@ -961,7 +1003,7 @@ class PvpManager {
     } else {
       // 3 or 4 players timeout handling
       for (const p of playerList) {
-        for (let idx = 0; idx < 5; idx++) {
+        for (let idx = 0; idx < segmentCount; idx++) {
           const sub = p.submissions[idx];
           if (!sub) {
             p.submissions[idx] = this.createTimeoutSubmission(room, idx);
@@ -1004,7 +1046,7 @@ class PvpManager {
         fluency_deduction: 0,
         critique: '该题超时未作答，得 0 分。',
         reference_translation:
-          getGradingMaterial(room.year, room.direction, idx)?.referenceAnswer || '',
+          getGradingMaterial(room.examId, room.direction, idx)?.referenceAnswer || '',
         gradedAt: Date.now(),
       },
     };
@@ -1053,10 +1095,14 @@ class PvpManager {
       return this.sendError(client, '你已交卷，无法继续提交', 'ALREADY_FINISHED');
     }
 
+    const segments = room.exam.translationSegments;
+    const segmentCount = segments.length;
+    const lastSegmentIdx = segmentCount - 1;
+
     const segmentIdx = Number(payload.segmentIndex);
-    if (!Number.isInteger(segmentIdx) || segmentIdx < 0 || segmentIdx > 4) {
+    if (!Number.isInteger(segmentIdx) || segmentIdx < 0 || segmentIdx >= segmentCount) {
       console.warn(
-        `[PVP] Invalid segment index ${JSON.stringify(payload.segmentIndex)} from player ${player.nickname} (${playerId}) in room ${room.roomCode}`
+        `[PVP] Invalid segment index ${JSON.stringify(payload.segmentIndex)} from player ${player.nickname} (${playerId}) in room ${room.roomCode} (segmentCount=${segmentCount})`
       );
       return this.sendError(client, '题目序号无效，请刷新页面后重试', 'INVALID_SEGMENT');
     }
@@ -1077,8 +1123,8 @@ class PvpManager {
     }
 
     const originalText =
-      getGradingMaterial(room.year, room.direction, segmentIdx)?.sourceText ||
-      room.exam.translationSegments[segmentIdx] ||
+      getGradingMaterial(room.examId, room.direction, segmentIdx)?.sourceText ||
+      segments[segmentIdx] ||
       '';
 
     player.lastActiveAt = Date.now();
@@ -1090,9 +1136,13 @@ class PvpManager {
       submittedAt: Date.now(),
     };
 
-    // Advance player to next segment immediately so no blocking
-    player.currentSegmentIndex = Math.max(player.currentSegmentIndex, Math.min(segmentIdx + 1, 4));
-    if (segmentIdx === 4) {
+    // Advance player to next segment immediately so no blocking; stays on the last
+    // segment for 3–5 sentence papers.
+    player.currentSegmentIndex = Math.max(
+      player.currentSegmentIndex,
+      Math.min(segmentIdx + 1, lastSegmentIdx)
+    );
+    if (segmentIdx === lastSegmentIdx) {
       player.isFinished = true;
       player.finishedAt = Date.now();
     }
@@ -1131,7 +1181,7 @@ class PvpManager {
     sub.gradingStatus = 'grading';
     this.broadcastRoomState(room.roomCode);
 
-    const material = getGradingMaterial(room.year, room.direction, segmentIdx);
+    const material = getGradingMaterial(room.examId, room.direction, segmentIdx);
     const targetSentence = material?.sourceText || room.exam.translationSegments[segmentIdx];
     console.log(
       `[PVP Individual] Grading Segment ${segmentIdx + 1} for ${player.nickname} (${player.playerId}) in Room ${room.roomCode} (${room.direction})`
@@ -1198,7 +1248,7 @@ class PvpManager {
     subB.gradingStatus = 'grading';
     this.broadcastRoomState(room.roomCode);
 
-    const material = getGradingMaterial(room.year, room.direction, segmentIdx);
+    const material = getGradingMaterial(room.examId, room.direction, segmentIdx);
     const targetSentence = material?.sourceText || room.exam.translationSegments[segmentIdx];
     console.log(
       `[PVP Pair] Triggering paired grading for Room ${room.roomCode}, Segment ${segmentIdx + 1} (${room.direction})`
@@ -1296,10 +1346,11 @@ class PvpManager {
     this.clearRoomTimers(roomCode);
 
     const playerList = Object.values(room.players);
+    const segmentCount = room.exam.translationSegments.length;
 
-    // Ensure all 5 segments exist for all players and total scores are accurately summed
+    // Ensure every segment exists for all players and total scores are accurately summed
     for (const player of playerList) {
-      for (let idx = 0; idx < 5; idx++) {
+      for (let idx = 0; idx < segmentCount; idx++) {
         if (!player.submissions[idx]) {
           player.submissions[idx] = this.createTimeoutSubmission(room, idx);
         }
@@ -1358,16 +1409,18 @@ class PvpManager {
 
       const deterministicId = `pvp-${room.roomCode}-${room.startedAt || room.createdAt || Date.now()}-${player.playerId}`;
 
-      const submissionsList: SegmentSubmission[] = [0, 1, 2, 3, 4].map((idx) => {
-        return (
-          player.submissions[idx] || this.createTimeoutSubmission(room, idx)
-        );
-      });
+      const submissionsList: SegmentSubmission[] = Array.from(
+        { length: segmentCount },
+        (_, idx) => player.submissions[idx] || this.createTimeoutSubmission(room, idx)
+      );
 
       const record: HistorySessionRecord = {
         id: deterministicId,
         type: 'pvp',
         year: room.year,
+        examId: room.examId,
+        bank: room.bank,
+        partLabel: room.partLabel,
         direction: room.direction,
         timestamp: Date.now(),
         totalScore: player.totalScore,

@@ -13,6 +13,10 @@
 The English fields remain the standard answer for Chinese→English. The Chinese
 fields are the prompt.
 
+The separate `cloze` / `reading` long-sentence banks are stored in
+`src/shared/data/passage-bank.json`; their source, extraction method and
+segment-level reference provenance are documented under *Passage banks* below.
+
 ## Primary source
 
 **懒笔记·考研英语英译汉真题在线对照** (1998–2026, full passage + per-sentence
@@ -93,9 +97,166 @@ published reference answer. `referenceSegmentSources` makes the distinction
 auditable, and `scripts/validate-bilingual-bank.ts` rejects malformed records or
 undocumented fallbacks.
 
+## Passage banks (完型 / 阅读长难句, cloze / reading)
+
+On 2026-11-17 the site added two long-sentence banks next to the 2002–2026
+translation bank:
+
+- `cloze` — one 完型填空 article per year, from which 3–5 long sentences are
+  selected as targets;
+- `reading` — 阅读理解 Text 1–4 per year (four articles), 3–5 long sentences each.
+
+Together they cover **2004–2025**: 22 years × (1 cloze + 4 reading texts) =
+**110 practice units**. One article is one paper. The passage banks are
+**English→Chinese only**: they intentionally store no `referencePassageMarkdown`,
+so the Chinese→English projection is unavailable and no reversed prompts are
+created from them.
+
+### Source
+
+**懒笔记·考研英语真题与解析** (https://english-exam.lazynote.cn) — the
+「完形填空（四选一）」 and 「阅读理解（四选一）」 question-type pages. Each page
+publishes the English passage with a **per-paragraph Chinese translation** and
+per-question analysis. Accessed **2026-11-17**.
+
+URL patterns (all under `/kaoyan/sections/`):
+
+- Cloze: `{year}-english-one/section1/` for 2010–2025, `{year}/section1/` for
+  2004–2009;
+- Reading Text 1: `{year}-english-one/section2-part-a/` for 2010–2025,
+  `{year}/section2-part-a/` for 2004–2009;
+- Reading Text 2–4: the same prefix with `section2-part-a-{n}/`, where `n = 2..4`.
+
+### Pipeline and stored fields
+
+The fetched pages are a local working artifact, never committed (`data/` is
+git-ignored). The committed bank is the source of truth.
+
+1. `scripts/fetch-passage-source.mjs` fetches each section page once and writes
+   `data/source/web/<examId>.json`:
+
+   ```jsonc
+   {
+     "examId": "2004-reading-1",
+     "year": 2004,
+     "bank": "reading",            // or "cloze"
+     "partIndex": 1,
+     "url": "https://english-exam.lazynote.cn/kaoyan/sections/2004/section2-part-a-1/",
+     "fetchedAt": "2026-11-17",
+     "title": "…",
+     "paragraphs": [{ "index": 1, "en": "…", "zh": "…" }],
+     // cloze only:
+     "clozeAnswers": { "1": { "letter": "C", "word": "centering" } },
+     "pageText": "…"               // stripped page text, curator reference only
+   }
+   ```
+
+   For cloze units the fetched paragraph object also keeps `enOriginal` (the
+   passage as rendered, blank numbers still open) before the blanks are filled.
+2. Curators turn each unit into `data/curated/<examId>.json` (also git-ignored),
+   selecting the target sentences and pairing them with their Chinese references.
+3. `scripts/build-passage-bank.mjs` merges the curated units into
+   `src/shared/data/passage-bank.json`; `--check` validates without writing.
+4. `scripts/validate-passage-bank.ts` (`pnpm validate:passage-bank`) is the
+   strict gate: 110 units / unique examIds / full 2004–2025 matrix, 3–5 segments
+   per unit, every target a verbatim substring of `contentMarkdown`, Chinese
+   references with a Han-character ratio ≥ 0.25, complete source fields, and
+   answer-field leakage checks on the public projection.
+
+Each committed record uses the following fields (`referenceNotes` is present only
+when a segment was adjusted):
+
+```jsonc
+{
+  "examId": "2004-reading-2",
+  "year": 2004,
+  "bank": "reading",
+  "partLabel": "阅读理解 Text 2",
+  "title": "…",
+  "contentMarkdown": "…",          // full English article
+  "translationSegments": ["…"],    // 3–5 target long sentences (English)
+  "referenceTranslations": ["…"],  // segment-level Chinese references
+  "referenceSource": { "name": "…", "url": "…", "accessedAt": "2026-11-17" },
+  "referenceSegmentSources": ["web", "web-completed", "…"],
+  "referenceNotes": ["…"]          // only where a segment was adjusted
+}
+```
+
+A paper's maximum score is `translationSegments.length × 2`, so a 3-sentence unit
+is worth 6 points and a 5-sentence unit 10.
+
+### Segment-level references (`web` / `web-completed`)
+
+The published translation is **paragraph-level**. For each target sentence the
+curator locates the corresponding clause or sentence inside that paragraph's
+translation and uses it as the segment reference — the bank does not invent new
+translations.
+
+- `web` — the paragraph translation contains the target sentence directly.
+- `web-completed` — minimal splitting or connective adjustment was needed when
+  cutting the sentence out of the paragraph translation (for example when the
+  published paragraph joins two sentences or uses a dash/colon instead of a full
+  stop). The reason is recorded in `referenceNotes`.
+- `reviewed-fallback` — the shared field definition inherited from the
+  translation bank for hand-checked translations where no public translation
+  exists for that exact sentence.
+
+`referenceSegmentSources` keeps the distinction auditable per sentence.
+
+### Cloze blanks
+
+The cloze article on the source page shows blanks as bare numbers. The fetch
+script fills each blank with the correct option published on the same page, so
+`contentMarkdown` is a complete, readable article and the target sentences are
+verbatim substrings. The blank-numbered original stays available as
+`enOriginal`, and the mapping used for the fill is stored in `clozeAnswers`, so
+the reconstruction can be traced back to the source.
+
+### Scanned-book source not used
+
+The original plan (user-specified) was to use the Baidu Netdisk set
+《逐词逐句精讲册英语一（2004-2025）》 (22 volumes) for the passage-bank references.
+That plan was abandoned on **2026-11-17** after verification:
+
+- every volume is a pure scanned image PDF with **no text layer**; Baidu's
+  server-side parse (`bdpan get-content`) returns no body text either;
+- local OCR via `scripts/extract-pdf-source.mjs` (pdftoppm + tesseract
+  `chi_sim+eng`) mangles the two-column layout: Chinese annotation columns are
+  interleaved into the English, and lines contain garbled characters.
+
+The books are therefore **not a source of this bank**; they are only kept aside
+as later manual cross-check material. The public bilingual pages above provide
+both the English original and an authoritative paragraph-level translation, which
+is exactly what a training bank needs.
+
+### Known limitations
+
+- The English text is copied from rendered HTML; punctuation/spacing may differ
+  from the printed paper (whitespace and HTML entities are normalised, wording is
+  not rewritten).
+- Target sentences are curator-selected long sentences, not official underlined
+  questions — there is no official per-sentence answer key for them.
+- Because segment references are cut out of paragraph translations, they can
+  differ slightly from the published paragraph translation in sentence boundaries
+  or connectives; every such adjustment is marked `web-completed` and documented
+  in `referenceNotes`.
+- The cloze article is reconstructed with the page's published answers; if a page
+  publishes a different key later, the snapshot is not re-fetched automatically.
+- Only the English passage and the Chinese translation are used for training. The
+  source page's per-question analysis, vocabulary notes and other original
+  editorial content are not copied into the bank.
+- These two banks have no Chinese→English mode, by design.
+
 ## Copyright / attribution
 
 The Chinese reference translations are publicly circulated exam-study answers;
 the source URL and access date are stored with every exam. The app uses them for
 non-commercial study/training and links back to the source in this document. The
 English exam text remains the authoritative answer and is not replaced.
+
+The passage-bank records follow the same rule: every unit stores its source name,
+URL and access date, and every segment records whether its Chinese reference was
+taken directly from the source (`web`) or minimally adjusted (`web-completed`).
+The upstream pages' per-question analysis and other editorial content are not
+redistributed; only the English passage and the Chinese translation needed for
+personal study are used. See also `public/legal/copyright.html`.

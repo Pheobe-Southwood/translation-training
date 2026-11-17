@@ -85,6 +85,19 @@ async function gotoHome(page) {
     null,
     { timeout: 30_000 }
   );
+  // The exam catalogue is fetched asynchronously, so the direction card can paint
+  // before any paper is selected — the solo CTA only names a paper once the
+  // catalogue has arrived. Wait for that, otherwise assertions race the fetch.
+  await page.waitForFunction(
+    () => {
+      const cta = [...document.querySelectorAll('button')].find((button) =>
+        /^开始\s/.test((button.innerText || '').trim())
+      );
+      return !!cta && !cta.disabled;
+    },
+    null,
+    { timeout: 30_000 }
+  );
 }
 
 async function bodyText(page) {
@@ -100,15 +113,16 @@ async function waitText(page, text, timeout = 30_000) {
 }
 
 async function clickDirection(page, direction) {
-  const label = direction === 'zh-en' ? '中译英' : '英译中';
-  const button = page.locator('button[aria-pressed]').filter({ hasText: label }).first();
+  // The bank cards also read “英译中 / 中译英”, so matching on the label alone grabs
+  // the wrong button; the direction cards carry an explicit hook instead.
+  const button = page.locator(`button[data-direction="${direction}"]`).first();
   await button.click();
   await page.waitForFunction(
-    ({ label }) => {
-      const active = document.querySelector('button[aria-pressed="true"]');
-      return !!active && active.textContent?.includes(label);
+    ({ direction }) => {
+      const active = document.querySelector(`button[data-direction="${direction}"]`);
+      return !!active && active.getAttribute('aria-pressed') === 'true';
     },
-    { label },
+    { direction },
     { timeout: 10_000 }
   );
 }
@@ -200,7 +214,7 @@ async function run() {
     await shot(host, '03-solo-zh-en-results');
 
     // --- PVP C→E: create, join, ready, paired grading, spectator ---
-    await host.getByRole('button', { name: /返回真题首页/ }).first().click();
+    await host.getByRole('button', { name: /返回题库首页/ }).first().click();
     await waitText(host, 'TRANSLATION DIRECTION');
     await host.getByRole('button', { name: /进入 PVP 联机大厅/ }).click();
     await waitText(host, 'PVP 多人竞技与观战大厅');
