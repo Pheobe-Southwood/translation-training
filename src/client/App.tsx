@@ -58,8 +58,18 @@ export const App: React.FC = () => {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(() => getStoredUser());
   const [currentView, setCurrentView] = useState<'home' | 'solo' | 'pvp-lobby' | 'pvp-match' | 'history'>('home');
-  const [selectedYear, setSelectedYear] = useState<number>(2024);
+  /**
+   * Canonical paper id (`2024-translation`, `2004-cloze`, `2004-reading-2`).
+   * A year alone is no longer unique now that one year has several papers.
+   */
+  // Empty until the player picks a paper: the homepage then defaults to the newest
+  // paper of the newest bank instead of a hard-coded 2024 translation paper.
+  const [selectedExamId, setSelectedExamId] = useState<string>('');
   const [direction, setDirection] = useState<TranslationDirection>(() => getStoredDirection());
+  /** Direction actually used by the paper just opened (cloze/reading force en-zh). */
+  const [sessionDirection, setSessionDirection] = useState<TranslationDirection>(() =>
+    getStoredDirection()
+  );
   const [nickname, setNickname] = useState<string>(() => getPlayerNickname());
 
   // Read-only spectate session (shareable link): no account required, and the
@@ -87,6 +97,12 @@ export const App: React.FC = () => {
     window.addEventListener('hashchange', parseHashRoute);
     return () => window.removeEventListener('hashchange', parseHashRoute);
   }, []);
+
+  // Every view starts at the top. Switching from a long lobby/history page to the
+  // live match used to keep the old scroll offset, hiding the active question card.
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: 'auto' });
+  }, [currentView]);
 
   // Resume a match that was interrupted by a refresh / app switch. The room code is
   // persisted when a match starts and cleared when it truly ends.
@@ -202,13 +218,15 @@ export const App: React.FC = () => {
     setStoredDirection(next);
   };
 
-  const handleStartSolo = (year: number) => {
-    setSelectedYear(year);
+  const handleStartSolo = (examId: string, sessionDir: TranslationDirection) => {
+    setSelectedExamId(examId);
+    setSessionDirection(sessionDir);
     setCurrentView('solo');
   };
 
-  const handleEnterPvpLobby = (year: number) => {
-    setSelectedYear(year);
+  const handleEnterPvpLobby = (examId: string, sessionDir: TranslationDirection) => {
+    setSelectedExamId(examId);
+    setSessionDirection(sessionDir);
     setInitialRoomCode(undefined);
     setInitialSpectate(false);
     setAutoJoinRoom(false);
@@ -267,6 +285,7 @@ export const App: React.FC = () => {
           <HomeView
             direction={direction}
             onChangeDirection={handleDirectionChange}
+            initialExamId={selectedExamId || undefined}
             onStartSolo={handleStartSolo}
             onEnterPvpLobby={handleEnterPvpLobby}
             onViewHistory={() => setCurrentView('history')}
@@ -274,12 +293,16 @@ export const App: React.FC = () => {
         )}
 
         {currentView === 'solo' && (
-          <SoloView year={selectedYear} direction={direction} onBack={() => setCurrentView('home')} />
+          <SoloView
+            examId={selectedExamId}
+            direction={sessionDirection}
+            onBack={() => setCurrentView('home')}
+          />
         )}
 
         {currentView === 'pvp-lobby' && (
           <PvpLobbyView
-            initialYear={selectedYear}
+            initialExamId={selectedExamId || undefined}
             initialDirection={direction}
             onDirectionChange={handleDirectionChange}
             playerId={playerId}

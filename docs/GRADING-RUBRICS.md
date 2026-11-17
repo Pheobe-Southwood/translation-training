@@ -7,8 +7,15 @@ The existing strict English→Chinese rubric remains in `src/server/deepseek.ts`
 scoring formula, or PVP paired-grading behaviour.
 
 Displayed reference translations are now the researched static Chinese reference
-for the segment (see `docs/DATA-SOURCES.md`) so that the English→Chinese reference
-and the Chinese→English prompt are the same sentence.
+for the segment (see `docs/DATA-SOURCES.md`). For the 2002–2026 translation bank
+this is the same sentence that serves as the Chinese→English prompt; for the
+2004–2025 cloze/reading passage units it is the segment-level Chinese reference
+derived from the paragraph translation (those banks have no Chinese→English mode).
+
+The rubric is applied per target sentence in every bank. The number of target
+sentences per paper varies — 5 for translation papers, 3–5 for cloze/reading
+units — so a paper's maximum is `2 × target count`. The rubric itself, the scoring
+formula and the paired-grading behaviour are unchanged.
 
 ## Chinese → English
 

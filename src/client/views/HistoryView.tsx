@@ -156,7 +156,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onBack }) => {
           className="flex items-center gap-1.5 px-3 py-1.5 border border-zinc-300 dark:border-zinc-700 hover:border-swiss-black dark:hover:border-zinc-400 font-mono text-xs font-bold transition-colors bg-white dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200"
         >
           <ArrowLeft className="w-3.5 h-3.5" />
-          返回真题首页
+          返回题库首页
         </button>
 
         <div className="flex items-center gap-3">
@@ -184,7 +184,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onBack }) => {
           练习与对战档案库
         </h1>
         <p className="font-mono text-xs text-zinc-600 dark:text-zinc-400 mt-2">
-          记录您的真题翻译与对战成绩，已安全持久化存储至线上云端数据库。
+          记录您的翻译真题、完型 / 阅读长难句练习与对战成绩，已安全持久化存储至线上云端数据库。
         </p>
       </div>
 
@@ -203,6 +203,12 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onBack }) => {
         <div className="space-y-4">
           {records.map((rec) => {
             const isExpanded = expandedId === rec.id;
+            // Passage-bank records only ever run English→Chinese; legacy records may
+            // lack bank/direction and fall back to the original translation paper.
+            const recDirection =
+              rec.bank && rec.bank !== 'translation' ? 'en-zh' : rec.direction || 'en-zh';
+            const recPartLabel = rec.partLabel || '翻译真题';
+            const recMaxScore = (rec.submissions.length || 5) * 2;
             const dateStr = new Date(rec.timestamp).toLocaleString('zh-CN', {
               month: '2-digit',
               day: '2-digit',
@@ -233,16 +239,16 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onBack }) => {
                     </span>
 
                     <span className={`font-mono text-[10px] font-black uppercase px-2 py-1 border shrink-0 ${
-                      rec.direction === 'zh-en'
+                      recDirection === 'zh-en'
                         ? 'bg-rose-50 dark:bg-rose-950/40 text-swiss-red dark:text-rose-300 border-swiss-red/60'
                         : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 border-zinc-300 dark:border-zinc-700'
                     }`}>
-                      {directionShort(rec.direction || 'en-zh')} · {directionLabel(rec.direction || 'en-zh')}
+                      {directionShort(recDirection)} · {directionLabel(recDirection)}
                     </span>
 
                     <div>
                       <div className="font-black text-sm sm:text-base text-swiss-black dark:text-zinc-100">
-                        {rec.year} 年考研英语（一）翻译
+                        {rec.year} 年 · {recPartLabel}
                       </div>
                       <div className="font-mono text-xs text-zinc-500 dark:text-zinc-400 flex items-center gap-3 mt-0.5">
                         <span>{dateStr}</span>
@@ -290,7 +296,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onBack }) => {
                       <span className="font-mono text-lg sm:text-xl font-black text-swiss-red">
                         {rec.totalScore.toFixed(1)}
                       </span>
-                      <span className="font-mono text-xs text-zinc-500 dark:text-zinc-400">/ 10.0</span>
+                      <span className="font-mono text-xs text-zinc-500 dark:text-zinc-400">/ {recMaxScore.toFixed(1)}</span>
                     </div>
 
                     <div className="text-zinc-400">
@@ -304,7 +310,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onBack }) => {
                   <div className="border-t-2 border-swiss-black dark:border-zinc-700 p-4 sm:p-6 bg-zinc-50 dark:bg-zinc-800/40 space-y-5">
                     <div className="font-mono text-xs font-bold text-zinc-700 dark:text-zinc-300 uppercase flex items-center gap-1.5">
                       <Sparkles className="w-3.5 h-3.5 text-swiss-red" />
-                      全套 5 题作答与程序阅卷评定细则
+                      全套 {rec.submissions.length} 题作答与程序阅卷评定细则
                     </div>
 
                     <div className="space-y-4">
@@ -317,7 +323,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onBack }) => {
                             studentAnswer={sub.studentAnswer}
                             originalText={sub.originalText}
                             segmentIndex={idx}
-                            direction={rec.direction || 'en-zh'}
+                            direction={recDirection}
                           />
                         );
                       })}

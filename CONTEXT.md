@@ -8,24 +8,28 @@ This document defines the core domain concepts, entities, and ubiquitous languag
 
 ### 1. Examination & Content (考卷与题库)
 
-- **Exam (考研真题套卷)**: A single year's master's entrance examination paper for English I (2002–2026), focused on the translation section. Each exam contains an overarching passage and a set of designated translation targets.
+- **Exam Bank (题库)**: The platform offers three question banks that coexist on the homepage: `translation` (the 2002–2026 翻译真题 translation-section papers), `cloze` (2004–2025 完型填空长难句) and `reading` (2004–2025 阅读理解长难句). The two passage banks are English→Chinese only; the translation bank additionally supports Chinese→English.
+- **Practice Unit / Exam (练习单元 / 一套卷)**: One article is one paper. A paper is identified by `examId` — `${year}-translation`, `${year}-cloze` or `${year}-reading-<n>` (e.g. `2024-translation`, `2004-cloze`, `2004-reading-2`). A year alone is no longer unique: 2004 now holds six papers. The passage banks cover 22 years × (1 cloze + 4 reading texts) = 110 practice units.
 - **Passage (短文全文)**: The complete source article in English that provides linguistic context, theme, and surrounding discourse for the highlighted translation sentences.
-- **Translation Segment (目标划线句)**: A designated sentence or clause within the passage identified with a question marker (such as `(61)` or `(1)`), worth a maximum of 2.0 points. Each exam contains exactly 5 translation segments (totaling 10.0 points).
-- **Reference Translation (标准参考译文)**: A published, fluent Chinese translation of the target segment used for comparative review and study. It is the same sentence used as the Chinese→English prompt.
-- **Translation Direction (翻译方向)**: `en-zh` (English source → Chinese answer, the original mode) or `zh-en` (Chinese source → English answer). Direction is a session/room setting; the solo and PVP rules are otherwise identical.
-- **Reverse Prompt Bank (反向题干)**: For Chinese→English, the Chinese prompt is the researched reference translation of an existing English target; the existing English target is the standard answer. No new English questions are added.
-- **Reference Segment Source (译文来源标记)**: `web` (published answer as-is), `web-completed` (published answer minimally completed/corrected against the existing English), or `reviewed-fallback` (no public answer exists for this exact non-underlined sentence; hand-checked translation).
+- **Translation Segment (目标句)**: A designated sentence within the passage, worth a maximum of 2.0 points. A translation paper has exactly 5 target sentences (10.0 points in total); a passage-bank unit has 3–5 target long sentences (6.0–10.0 points in total).
+- **Variable Target Count (变长目标句)**: The number of target sentences is a property of the paper rather than a fixed platform constant: 5 for the translation bank and 3–5 for the passage banks. Every count shown to a user — progress, score maximum, match settlement — follows the paper.
+- **Reference Translation (参考译文)**: The Chinese reference for a target sentence, used for review and scoring. In the translation bank it also serves as the Chinese prompt for Chinese→English; passage-bank references are never used as prompts.
+- **Paragraph Translation (逐段译文)**: The published Chinese translation of a passage, paragraph by paragraph. It is the source of the passage banks' segment-level references.
+- **Segment Reference Translation (单句参考译文)**: The clause or sentence located inside a paragraph translation for one target sentence. A direct match is marked `web`; a minimal splitting or connective adjustment is marked `web-completed` and explained in the paper's reference notes.
+- **Translation Direction (翻译方向)**: `en-zh` (English source → Chinese answer, the original mode) or `zh-en` (Chinese source → English answer). Only the translation bank offers `zh-en`; the cloze and reading banks always run `en-zh`. Direction is a session/room setting; the solo and PVP rules are otherwise identical.
+- **Reverse Prompt Bank (反向题干)**: For Chinese→English, the Chinese prompt is the researched reference translation of an existing English target; the existing English target is the standard answer. No new English questions are added, and the passage banks contribute no reversed prompts.
+- **Reference Segment Source (译文来源标记)**: `web` (a published translation used as-is; for the passage banks, the paragraph translation that contains the target sentence directly), `web-completed` (a published translation minimally completed or corrected against the existing English, or minimally split/joined when a target sentence is cut out of a paragraph translation; recorded in `referenceNotes`), or `reviewed-fallback` (no public translation exists for that exact sentence; hand-checked translation).
 
 ### 2. Practice & Modes (练习与对战模式)
 
-- **Solo Session (单人练习模式)**: A self-paced training session where a single student works through the 5 translation segments of a chosen exam. Upon submitting each segment, the student immediately advances to the next segment while AI scoring proceeds asynchronously in the background.
-- **PVP Match (双人实时对战模式)**: A synchronized competition between two players on the same exam. Both players race against the clock and against each other to translate the 5 segments accurately.
+- **Solo Session (单人练习模式)**: A self-paced training session where a single student works through all target sentences of the chosen paper (5 for a translation paper, 3–5 for a passage unit). Upon submitting each segment, the student immediately advances to the next segment while AI scoring proceeds asynchronously in the background.
+- **PVP Match (双人实时对战模式)**: A synchronized competition between two players on the same paper. Both players race against the clock and against each other to translate all target sentences of that paper.
 - **PVP Room (对战房间)**: An ephemeral arena identified by a unique 6-character room code (e.g. `K9X2P4`) where a Host and an Opponent gather, configure match duration, signal readiness, and compete.
 - **Single Active Room Binding (单房活跃绑定)**: A player belongs to exactly one active room at a time. Entering a new room releases the seat in every abandoned room; a player already inside a running match cannot enter a second one. Room membership is never guessed from identity alone, so a stale room can never speak for a live match.
 - **Spectator (观战者)**: A non-competing observer seated outside the player slots. Spectators never appear in the player list, never signal readiness, and never influence the match clock, grading, or settlement.
 - **Link Spectator (免登录观战者)**: A spectator who arrives through a shareable spectate link and holds no account. Their seat is strictly read-only: they may watch, and may not create rooms, take player seats, signal readiness, or submit translations.
 - **Match Clock (对战计时器)**: A shared countdown timer (default 15 minutes) for the PVP match. The match concludes when both players finish all segments or when the clock reaches zero.
-- **Player Progress (选手进度)**: The real-time status of a player within a match or session, including current segment index (0–4), submission timestamps, individual segment grading statuses, and cumulative score.
+- **Player Progress (选手进度)**: The real-time status of a player within a match or session, including current segment index (0 to N−1, where N is the paper's target count), submission timestamps, individual segment grading statuses, and cumulative score.
 
 ### 3. Evaluation & Grading (采分与阅卷)
 

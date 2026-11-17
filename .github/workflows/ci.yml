@@ -45,6 +45,9 @@ jobs:
       - name: Validate bilingual reference bank
         run: pnpm validate:data
 
+      - name: Validate cloze/reading passage bank
+        run: pnpm validate:passage-bank
+
       - name: Production build
         run: pnpm build
 
@@ -81,7 +84,7 @@ jobs:
           cat /tmp/server.log
           exit 1
 
-      - name: Playwright E2E (C→E solo + PVP + spectator + E→C regression)
+      - name: Playwright E2E (translation C→E/E→C + PVP + spectator, cloze/reading banks)
         env:
           E2E_BASE_URL: http://127.0.0.1:8890
           E2E_MODE: mock
