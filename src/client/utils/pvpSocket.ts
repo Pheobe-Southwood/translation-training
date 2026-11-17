@@ -68,7 +68,6 @@ export class PvpSocket {
   private readonly playerId: string;
   private readonly ticket?: string;
   private readonly nickname?: string;
-  private readonly spectatorOnly: boolean;
   private ws: WebSocket | null = null;
   private roomCode?: string;
   private status: PvpConnectionStatus = 'idle';
@@ -90,7 +89,6 @@ export class PvpSocket {
     this.playerId = playerId;
     this.ticket = options.ticket;
     this.nickname = options.nickname;
-    this.spectatorOnly = !!options.ticket;
   }
 
   // --- Subscriptions -------------------------------------------------------
@@ -135,25 +133,8 @@ export class PvpSocket {
     return this.statusMessage;
   }
 
-  public getRoomCode(): string | undefined {
-    return this.roomCode;
-  }
-
-  public getLastRoomState(): PvpRoomState | null {
-    return this.lastRoomState;
-  }
-
-  public getReconnectAttempt(): number {
-    return this.reconnectAttempt;
-  }
-
   public isOpen(): boolean {
     return !!this.ws && this.ws.readyState === WebSocket.OPEN;
-  }
-
-  /** True for ticket viewers: read-only, no account behind the connection. */
-  public isSpectatorOnly(): boolean {
-    return this.spectatorOnly;
   }
 
   public setRoomCode(roomCode?: string): void {

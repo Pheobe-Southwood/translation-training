@@ -78,34 +78,22 @@ class AppDatabase {
       CREATE INDEX IF NOT EXISTS idx_history_user_time ON history_records (user_id, timestamp DESC);
     `);
 
-    // Additive migration: recorded consent to the user agreement / privacy policy.
-    const userColumns = this.db.prepare('PRAGMA table_info(users)').all() as Array<{
-      name?: string;
-    }>;
-    if (!userColumns.some((column) => column.name === 'terms_version')) {
-      this.db.exec('ALTER TABLE users ADD COLUMN terms_version TEXT');
-      this.db.exec('ALTER TABLE users ADD COLUMN terms_accepted_at INTEGER');
-      console.log('[db] Added users.terms_version / terms_accepted_at');
-    }
+    // Additive migrations for columns added after the first release.
+    const ensureColumn = (table: string, name: string, ddl: string) => {
+      const columns = this.db
+        .prepare(`PRAGMA table_info(${table})`)
+        .all() as Array<{ name?: string }>;
+      if (columns.some((column) => column.name === name)) return;
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+      console.log(`[db] Added ${table}.${name}`);
+    };
+    ensureColumn('users', 'terms_version', 'terms_version TEXT');
+    ensureColumn('users', 'terms_accepted_at', 'terms_accepted_at INTEGER');
+    ensureColumn('history_records', 'direction', "direction TEXT NOT NULL DEFAULT 'en-zh'");
+    ensureColumn('history_records', 'exam_id', 'exam_id TEXT');
 
-    // Additive migration for databases created before the direction column.
-    const columns = this.db.prepare('PRAGMA table_info(history_records)').all() as Array<{
-      name?: string;
-    }>;
-    if (!columns.some((column) => column.name === 'direction')) {
-      this.db.exec(
-        "ALTER TABLE history_records ADD COLUMN direction TEXT NOT NULL DEFAULT 'en-zh'"
-      );
-      console.log('[db] Added history_records.direction (default en-zh)');
-    }
-
-    // Additive migration for databases created before examId (`year` alone stopped
-    // being unique once several banks share a year). Idempotent: the ALTER only
-    // runs when the column is missing, the backfill only touches NULL/blank rows.
-    if (!columns.some((column) => column.name === 'exam_id')) {
-      this.db.exec('ALTER TABLE history_records ADD COLUMN exam_id TEXT');
-      console.log('[db] Added history_records.exam_id');
-    }
+    // Backfill: records written before examId existed belong to the translation
+    // bank of their year. Idempotent — only NULL/blank rows are touched.
     const backfill = this.db
       .prepare(
         "UPDATE history_records SET exam_id = CAST(year AS TEXT) || '-translation' " +

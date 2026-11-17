@@ -187,8 +187,6 @@ class PvpManager {
         this.joinRoom(client, payload);
         break;
       case 'room:update_settings':
-      // Older/newer clients have used both names for the same host-only action.
-      case 'room:update_config':
         this.updateRoomSettings(client, payload);
         break;
       case 'room:toggle_ready':
@@ -454,7 +452,6 @@ class PvpManager {
       isHost: true,
       isReady: false,
       isOnline: true,
-      lastActiveAt: Date.now(),
       currentSegmentIndex: 0,
       submissions: {},
       totalScore: 0,
@@ -530,7 +527,6 @@ class PvpManager {
     // A player seat always wins over a spectator seat in the same room.
     if (existingPlayer) {
       existingPlayer.isOnline = true;
-      existingPlayer.lastActiveAt = Date.now();
       if (payload.nickname) existingPlayer.nickname = safeNickname(payload.nickname, existingPlayer.nickname);
       client.roomCode = code;
       client.role = 'player';
@@ -597,7 +593,6 @@ class PvpManager {
       isHost: false,
       isReady: false,
       isOnline: true,
-      lastActiveAt: Date.now(),
       currentSegmentIndex: 0,
       submissions: {},
       totalScore: 0,
@@ -682,7 +677,6 @@ class PvpManager {
         isHost: false,
         isReady: false,
         isOnline: true,
-        lastActiveAt: Date.now(),
         currentSegmentIndex: 0,
         submissions: {},
         totalScore: 0,
@@ -750,9 +744,6 @@ class PvpManager {
   private updateRoomSettings(
     client: ConnectedClient,
     payload: {
-      examId?: string;
-      year?: number;
-      durationMinutes?: number;
       maxPlayers?: number;
       allowSpectators?: boolean;
       direction?: string;
@@ -769,58 +760,23 @@ class PvpManager {
       return this.sendError(client, '只有房主可以更改房间设置');
     }
 
-    let examChanged = false;
-    let nextDirection = room.direction;
-
     if (payload.direction !== undefined) {
-      const parsed = parseDirection(payload.direction);
-      if (!parsed) {
+      const nextDirection = parseDirection(payload.direction);
+      if (!nextDirection) {
         return this.sendError(client, '无效的翻译方向，仅支持 en-zh 或 zh-en', 'INVALID_DIRECTION');
       }
-      nextDirection = parsed;
-    }
-
-    const requestedExamId =
-      typeof payload.examId === 'string' && payload.examId.trim() ? payload.examId.trim() : undefined;
-
-    if (requestedExamId || payload.year || nextDirection !== room.direction) {
-      let exam: TranslationExam | undefined;
-      if (requestedExamId) {
-        exam = getExamById(requestedExamId, nextDirection);
+      if (nextDirection !== room.direction) {
+        const exam = getExamById(room.examId, nextDirection);
         if (!exam) {
-          return this.sendError(
-            client,
-            `未找到题库卷 ${requestedExamId}（${nextDirection}）`,
-            'EXAM_NOT_FOUND'
-          );
+          return this.sendError(client, '该试卷暂无对应方向的题库，请换一套', 'EXAM_NOT_FOUND');
         }
-      } else {
-        // Legacy year payloads mean the translation paper; a direction-only change
-        // stays on the paper already selected in the room.
-        const targetExamId = payload.year ? `${payload.year}-translation` : room.examId;
-        exam = getExamById(targetExamId, nextDirection);
-        if (!exam) {
-          return this.sendError(client, '该年份暂无对应方向的题库，请换一套', 'EXAM_NOT_FOUND');
-        }
+        room.direction = nextDirection;
+        room.exam = exam;
+        // A different direction invalidates every "ready" state; otherwise a room
+        // could start instantly on a paper nobody has seen.
+        for (const p of Object.values(room.players)) p.isReady = false;
+        room.status = 'WAITING';
       }
-      examChanged = exam.examId !== room.examId || nextDirection !== room.direction;
-      room.year = exam.year;
-      room.examId = exam.examId;
-      room.bank = exam.bank;
-      room.partLabel = exam.partLabel;
-      room.direction = nextDirection;
-      room.exam = exam;
-    }
-
-    if (examChanged) {
-      // A different paper/direction invalidates every "ready" state; otherwise a
-      // room could start instantly on a paper nobody has seen.
-      for (const p of Object.values(room.players)) p.isReady = false;
-      room.status = 'WAITING';
-    }
-
-    if (payload.durationMinutes && [10, 15, 20].includes(payload.durationMinutes)) {
-      room.durationMinutes = payload.durationMinutes;
     }
 
     if (payload.maxPlayers && [2, 3, 4].includes(payload.maxPlayers)) {
@@ -858,7 +814,6 @@ class PvpManager {
     if (!player) return;
 
     player.isReady = !player.isReady;
-    player.lastActiveAt = Date.now();
 
     const players = Object.values(room.players);
     if (players.length >= 2 && players.length === room.maxPlayers && players.every((p) => p.isReady)) {
@@ -872,7 +827,6 @@ class PvpManager {
   private startCountdown(room: PvpRoomState) {
     room.status = 'COUNTDOWN';
     const countdownSeconds = 3;
-    room.countdownEndTime = Date.now() + countdownSeconds * 1000;
     this.broadcastRoomState(room.roomCode);
 
     let remaining = countdownSeconds;
@@ -1047,7 +1001,6 @@ class PvpManager {
         critique: '该题超时未作答，得 0 分。',
         reference_translation:
           getGradingMaterial(room.examId, room.direction, idx)?.referenceAnswer || '',
-        gradedAt: Date.now(),
       },
     };
   }
@@ -1060,7 +1013,6 @@ class PvpManager {
       for (const sub of Object.values(player.submissions)) {
         if (sub.gradingStatus === 'grading' || sub.gradingStatus === 'waiting_pair') {
           sub.gradingStatus = 'error';
-          sub.error = '评分超时（网络故障或接口无响应）';
         }
       }
     }
@@ -1126,8 +1078,6 @@ class PvpManager {
       getGradingMaterial(room.examId, room.direction, segmentIdx)?.sourceText ||
       segments[segmentIdx] ||
       '';
-
-    player.lastActiveAt = Date.now();
     player.submissions[segmentIdx] = {
       segmentIndex: segmentIdx,
       originalText,
@@ -1224,7 +1174,6 @@ class PvpManager {
       .catch((err) => {
         console.error(`[PVP Individual] Grading failed for ${player.nickname}:`, err);
         sub.gradingStatus = 'error';
-        sub.error = err.message || '评分服务出现暂时错误';
 
         this.broadcastRoomState(room.roomCode);
         this.checkAllFinished(room);
@@ -1312,9 +1261,7 @@ class PvpManager {
       .catch((err) => {
         console.error('[PVP Pair] Paired grading failed:', err);
         subA.gradingStatus = 'error';
-        subA.error = err.message || '评分服务出现暂时错误';
         subB.gradingStatus = 'error';
-        subB.error = err.message || '评分服务出现暂时错误';
 
         this.broadcastRoomState(room.roomCode);
         this.checkAllFinished(room);
@@ -1505,7 +1452,6 @@ class PvpManager {
     if (isPlayer) {
       const player = room.players[playerId];
       player.isOnline = true;
-      player.lastActiveAt = Date.now();
       console.log(
         `[PVP] Manual reconnect successful for player ${playerId} into room ${room.roomCode} ` +
           `(status=${room.status}, segment=${player.currentSegmentIndex + 1})`
@@ -1605,7 +1551,6 @@ class PvpManager {
       const player = room.players[client.playerId];
       if (player) {
         player.isOnline = false;
-        player.lastActiveAt = Date.now();
         changed = true;
         console.log(
           `[PVP] Socket disconnected for player ${player.nickname} (${client.playerId}) in room ${room.roomCode}. Room preserved.`
@@ -1636,7 +1581,14 @@ class PvpManager {
     ]);
 
     for (const pid of recipients) {
-      this.sendRawToPlayer(pid, data);
+      for (const ws of this.playerSockets.get(pid) || []) {
+        if (ws.readyState !== 1 /* OPEN */) continue;
+        try {
+          ws.send(data);
+        } catch (err) {
+          console.error(`[PVP] Failed to deliver frame to ${pid}`, err);
+        }
+      }
     }
   }
 
@@ -1647,21 +1599,6 @@ class PvpManager {
       type: 'room:state',
       payload: room,
     });
-  }
-
-  /** Deliver a raw frame to every live socket of an identity (multi-tab safe). */
-  private sendRawToPlayer(playerId: string, data: string) {
-    const sockets = this.playerSockets.get(playerId);
-    if (!sockets) return;
-    for (const ws of sockets) {
-      if (ws.readyState === 1 /* OPEN */) {
-        try {
-          ws.send(data);
-        } catch (err) {
-          console.error(`[PVP] Failed to deliver frame to ${playerId}`, err);
-        }
-      }
-    }
   }
 
   private sendToClient(client: ConnectedClient, message: any) {

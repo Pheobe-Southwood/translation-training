@@ -355,11 +355,9 @@ function projectEnZh(unit: PassageUnit) {
   const segments = asStringArray(unit.translationSegments);
   return {
     examId: unit.examId,
-    id: unit.examId,
     bank: unit.bank,
     partLabel: unit.partLabel,
     year: unit.year,
-    title: unit.title,
     maxScore: segments.length * 2,
     contentMarkdown: unit.contentMarkdown,
     translationSegments: segments,
@@ -408,11 +406,9 @@ for (const unit of units) {
 
 interface PublicPassageExam {
   examId?: string;
-  id?: string;
   bank?: string;
   partLabel?: string;
   year?: number;
-  title?: string;
   maxScore?: number;
   contentMarkdown?: string;
   translationSegments?: string[];
@@ -443,7 +439,6 @@ try {
         expect(!!publicExam, `projection: getExamById("${label}", "en-zh") returned undefined`);
         if (publicExam) {
           expect(publicExam.examId === label, `projection: ${label} public examId mismatch`);
-          expect(publicExam.id === label, `projection: ${label} public id mismatch`);
           expect(publicExam.bank === bank, `projection: ${label} public bank mismatch`);
           expect(publicExam.year === sample.year, `projection: ${label} public year mismatch`);
           expect(

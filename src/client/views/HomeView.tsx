@@ -1,26 +1,18 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React from 'react';
 import { ArrowRight, Dices, Swords, Trophy, Languages, FileText, BookOpen } from 'lucide-react';
-import type {
-  ExamBank,
-  ExamCatalogEntry,
-  TranslationDirection,
-} from '../../shared/types.js';
+import type { ExamBank, TranslationDirection } from '../../shared/types.js';
 import { directionLabel } from '../../shared/direction.js';
 import {
   EXAM_BANKS,
   EXAM_BANK_META,
-  entriesForYear,
-  fetchAllExamCatalogs,
-  inferBankFromExamId,
   isEnZhOnlyBank,
   paperPartLabel,
   paperSummary,
-  resolveInitialSelection,
   segmentSpan,
-  uniqueYears,
   unitLabel,
   yearSpan,
 } from '../utils/exams.js';
+import { useExamCatalog } from '../utils/useExamCatalog.js';
 
 interface HomeViewProps {
   direction: TranslationDirection;
@@ -31,12 +23,6 @@ interface HomeViewProps {
   onEnterPvpLobby: (examId: string, direction: TranslationDirection) => void;
   onViewHistory: () => void;
 }
-
-const EMPTY_CATALOGS: Record<ExamBank, ExamCatalogEntry[]> = {
-  translation: [],
-  cloze: [],
-  reading: [],
-};
 
 const BANK_ICONS: Record<ExamBank, React.ReactNode> = {
   translation: <Languages className="w-4 h-4" />,
@@ -52,70 +38,24 @@ export const HomeView: React.FC<HomeViewProps> = ({
   onEnterPvpLobby,
   onViewHistory,
 }) => {
-  const [catalogs, setCatalogs] = useState<Record<ExamBank, ExamCatalogEntry[]>>(EMPTY_CATALOGS);
-  const [bank, setBank] = useState<ExamBank>(() => inferBankFromExamId(initialExamId));
-  const [selectedYear, setSelectedYear] = useState<number | null>(null);
-  const [selectedUnitId, setSelectedUnitId] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    fetchAllExamCatalogs().then((loaded) => {
-      if (cancelled) return;
-      setCatalogs(loaded);
-      const selection = resolveInitialSelection(loaded, initialExamId);
-      if (selection) {
-        setBank(selection.bank);
-        setSelectedYear(selection.year);
-        setSelectedUnitId(selection.examId);
-      }
-      setLoading(false);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [initialExamId]);
-
-  const bankEntries = catalogs[bank];
-  const years = useMemo(() => uniqueYears(bankEntries), [bankEntries]);
-  const unitEntries = useMemo(
-    () => entriesForYear(bankEntries, selectedYear),
-    [bankEntries, selectedYear]
-  );
-  const selectedEntry = useMemo(() => {
-    if (unitEntries.length === 0) return null;
-    return unitEntries.find((entry) => entry.examId === selectedUnitId) || unitEntries[0];
-  }, [unitEntries, selectedUnitId]);
-
-  const enZhOnly = isEnZhOnlyBank(bank);
-  /** Cloze/reading have no Chinese reference bank: direction is locked to en-zh. */
-  const effectiveDirection: TranslationDirection = enZhOnly ? 'en-zh' : direction;
+  const {
+    catalogs,
+    bank,
+    years,
+    selectedYear,
+    unitEntries,
+    selectedEntry,
+    enZhOnly,
+    effectiveDirection,
+    loading,
+    selectBank,
+    selectYear,
+    selectUnit,
+    selectRandom,
+  } = useExamCatalog(initialExamId, direction);
   const isZhEn = effectiveDirection === 'zh-en';
   const segmentCount = selectedEntry?.segmentCount ?? 5;
   const maxScore = selectedEntry?.maxScore ?? 10;
-
-  const applyBank = (nextBank: ExamBank) => {
-    setBank(nextBank);
-    const nextEntries = catalogs[nextBank];
-    const nextYears = uniqueYears(nextEntries);
-    const nextYear =
-      selectedYear !== null && nextYears.includes(selectedYear) ? selectedYear : nextYears[0] ?? null;
-    setSelectedYear(nextYear);
-    setSelectedUnitId(entriesForYear(nextEntries, nextYear)[0]?.examId ?? null);
-  };
-
-  const applyYear = (year: number) => {
-    setSelectedYear(year);
-    setSelectedUnitId(entriesForYear(bankEntries, year)[0]?.examId ?? null);
-  };
-
-  const handleRandomPaper = () => {
-    if (bankEntries.length === 0) return;
-    const random = bankEntries[Math.floor(Math.random() * bankEntries.length)];
-    setSelectedYear(random.year);
-    setSelectedUnitId(random.examId);
-  };
 
   const handleStartSolo = () => {
     if (!selectedEntry) return;
@@ -193,7 +133,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
                 key={itemBank}
                 type="button"
                 aria-pressed={selected}
-                onClick={() => applyBank(itemBank)}
+                onClick={() => selectBank(itemBank)}
                 className={`text-left p-4 sm:p-5 transition-colors focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-swiss-red/40 border-swiss-black dark:border-zinc-700 ${
                   index > 0
                     ? 'border-t-2 sm:border-t-0 sm:border-l-2'
@@ -364,8 +304,8 @@ export const HomeView: React.FC<HomeViewProps> = ({
                 {enZhOnly ? '文章年份选择' : '真题年份选择'} (SELECT YEAR)
               </div>
               <button
-                onClick={handleRandomPaper}
-                disabled={bankEntries.length === 0}
+                onClick={selectRandom}
+                disabled={catalogs[bank].length === 0}
                 className="flex items-center gap-1.5 px-2.5 py-1 border border-zinc-300 dark:border-zinc-700 hover:border-swiss-black dark:hover:border-zinc-500 font-mono text-xs font-bold transition-colors bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-200 disabled:opacity-40"
               >
                 <Dices className="w-3.5 h-3.5 text-swiss-red" />
@@ -389,7 +329,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
                   return (
                     <button
                       key={y}
-                      onClick={() => applyYear(y)}
+                      onClick={() => selectYear(y)}
                       className={`py-2 px-1 text-center font-mono text-xs font-bold border transition-all ${
                         isSelected
                           ? 'bg-swiss-black text-white border-swiss-black dark:bg-zinc-100 dark:text-swiss-black dark:border-zinc-100 shadow-[2px_2px_0px_0px_#E11D48]'
@@ -424,7 +364,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
                     return (
                       <button
                         key={entry.examId}
-                        onClick={() => setSelectedUnitId(entry.examId)}
+                        onClick={() => selectUnit(entry.examId)}
                         aria-pressed={isSelected}
                         title={paperPartLabel(entry)}
                         className={`py-2 px-2 text-center border transition-all ${

@@ -8,6 +8,62 @@ interface PasswordGateProps {
   onSuccess: (user: AuthUser) => void;
 }
 
+const INPUT_CLASS =
+  'w-full border-2 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-800 text-swiss-black dark:text-zinc-100 px-3 py-2 font-mono text-base sm:text-sm focus:outline-none focus:bg-zinc-50 dark:focus:bg-zinc-700/60 transition-colors placeholder:text-zinc-400 dark:placeholder:text-zinc-500';
+const LABEL_CLASS =
+  'block text-xs font-mono font-bold uppercase mb-1 text-zinc-700 dark:text-zinc-300';
+
+interface FieldProps {
+  label: React.ReactNode;
+  labelClassName?: string;
+  type?: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  icon?: React.ReactNode;
+  inputRef?: React.Ref<HTMLInputElement>;
+  autoFocus?: boolean;
+}
+
+/** Label + input (+ optional trailing icon) used by every credential field. */
+const Field: React.FC<FieldProps> = ({
+  label,
+  labelClassName = LABEL_CLASS,
+  type = 'text',
+  value,
+  onChange,
+  placeholder,
+  icon,
+  inputRef,
+  autoFocus,
+}) => {
+  const input = (
+    <input
+      type={type}
+      ref={inputRef}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      autoFocus={autoFocus}
+      className={INPUT_CLASS}
+    />
+  );
+
+  return (
+    <div>
+      <label className={labelClassName}>{label}</label>
+      {icon ? (
+        <div className="relative">
+          {input}
+          <div className="absolute right-3 top-2.5 text-zinc-400 dark:text-zinc-500">{icon}</div>
+        </div>
+      ) : (
+        input
+      )}
+    </div>
+  );
+};
+
 export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [username, setUsername] = useState('');
@@ -193,43 +249,24 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
         {/* Form Container */}
         {mode === 'login' ? (
           <form onSubmit={handleLoginSubmit} className="space-y-4">
-            <div>
-              <label className="block text-xs font-mono font-bold uppercase mb-1 text-zinc-700 dark:text-zinc-300">
-                账号 (USERNAME)
-              </label>
-              <div className="relative">
-                <input
-                  type="text"
-                  ref={usernameInputRef}
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  placeholder="请输入您的账号"
-                  autoFocus
-                  className="w-full border-2 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-800 text-swiss-black dark:text-zinc-100 px-3 py-2 font-mono text-base sm:text-sm focus:outline-none focus:bg-zinc-50 dark:focus:bg-zinc-700/60 transition-colors placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
-                />
-                <div className="absolute right-3 top-2.5 text-zinc-400 dark:text-zinc-500">
-                  <User className="w-4 h-4" />
-                </div>
-              </div>
-            </div>
+            <Field
+              label="账号 (USERNAME)"
+              value={username}
+              onChange={setUsername}
+              placeholder="请输入您的账号"
+              icon={<User className="w-4 h-4" />}
+              inputRef={usernameInputRef}
+              autoFocus
+            />
 
-            <div>
-              <label className="block text-xs font-mono font-bold uppercase mb-1 text-zinc-700 dark:text-zinc-300">
-                密码 (PASSWORD)
-              </label>
-              <div className="relative">
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="请输入密码"
-                  className="w-full border-2 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-800 text-swiss-black dark:text-zinc-100 px-3 py-2 font-mono text-base sm:text-sm focus:outline-none focus:bg-zinc-50 dark:focus:bg-zinc-700/60 transition-colors placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
-                />
-                <div className="absolute right-3 top-2.5 text-zinc-400 dark:text-zinc-500">
-                  <Lock className="w-4 h-4" />
-                </div>
-              </div>
-            </div>
+            <Field
+              label="密码 (PASSWORD)"
+              type="password"
+              value={password}
+              onChange={setPassword}
+              placeholder="请输入密码"
+              icon={<Lock className="w-4 h-4" />}
+            />
 
             {error && (
               <div className="p-3 bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-900 text-red-700 dark:text-red-300 text-xs font-mono">
@@ -257,64 +294,43 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ onSuccess }) => {
           </form>
         ) : (
           <form onSubmit={handleRegisterSubmit} className="space-y-3.5">
-            <div>
-              <label className="block text-xs font-mono font-bold uppercase mb-1 text-zinc-700 dark:text-zinc-300">
-                账号 (USERNAME)
-              </label>
-              <input
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                placeholder="设置账号 (2-24字符)"
-                className="w-full border-2 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-800 text-swiss-black dark:text-zinc-100 px-3 py-2 font-mono text-base sm:text-sm focus:outline-none focus:bg-zinc-50 dark:focus:bg-zinc-700/60 transition-colors placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
-              />
-            </div>
+            <Field
+              label="账号 (USERNAME)"
+              value={username}
+              onChange={setUsername}
+              placeholder="设置账号 (2-24字符)"
+            />
 
-            <div>
-              <label className="block text-xs font-mono font-bold uppercase mb-1 text-zinc-700 dark:text-zinc-300">
-                设置密码 (PASSWORD)
-              </label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="设置密码 (不少于4位)"
-                className="w-full border-2 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-800 text-swiss-black dark:text-zinc-100 px-3 py-2 font-mono text-base sm:text-sm focus:outline-none focus:bg-zinc-50 dark:focus:bg-zinc-700/60 transition-colors placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
-              />
-            </div>
+            <Field
+              label="设置密码 (PASSWORD)"
+              type="password"
+              value={password}
+              onChange={setPassword}
+              placeholder="设置密码 (不少于4位)"
+            />
 
-            <div>
-              <label className="block text-xs font-mono font-bold uppercase mb-1 text-zinc-700 dark:text-zinc-300 flex items-center justify-between">
-                <span>系统邀请码 (INVITATION CODE)</span>
-                <span className="text-swiss-red font-bold text-[10px]">* 必填以激活</span>
-              </label>
-              <div className="relative">
-                <input
-                  type="password"
-                  ref={invitationInputRef}
-                  value={invitationCode}
-                  onChange={(e) => setInvitationCode(e.target.value)}
-                  placeholder="请输入系统邀请码"
-                  className="w-full border-2 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-800 text-swiss-black dark:text-zinc-100 px-3 py-2 font-mono text-base sm:text-sm focus:outline-none focus:bg-zinc-50 dark:focus:bg-zinc-700/60 transition-colors placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
-                />
-                <div className="absolute right-3 top-2.5 text-zinc-400 dark:text-zinc-500">
-                  <KeyRound className="w-4 h-4" />
-                </div>
-              </div>
-            </div>
+            <Field
+              label={
+                <>
+                  <span>系统邀请码 (INVITATION CODE)</span>
+                  <span className="text-swiss-red font-bold text-[10px]">* 必填以激活</span>
+                </>
+              }
+              labelClassName={`${LABEL_CLASS} flex items-center justify-between`}
+              type="password"
+              value={invitationCode}
+              onChange={setInvitationCode}
+              placeholder="请输入系统邀请码"
+              icon={<KeyRound className="w-4 h-4" />}
+              inputRef={invitationInputRef}
+            />
 
-            <div>
-              <label className="block text-xs font-mono font-bold uppercase mb-1 text-zinc-700 dark:text-zinc-300">
-                对战昵称 (NICKNAME - 选填)
-              </label>
-              <input
-                type="text"
-                value={nickname}
-                onChange={(e) => setNickname(e.target.value)}
-                placeholder="默认为您的账号名"
-                className="w-full border-2 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-800 text-swiss-black dark:text-zinc-100 px-3 py-2 font-mono text-base sm:text-sm focus:outline-none focus:bg-zinc-50 dark:focus:bg-zinc-700/60 transition-colors placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
-              />
-            </div>
+            <Field
+              label="对战昵称 (NICKNAME - 选填)"
+              value={nickname}
+              onChange={setNickname}
+              placeholder="默认为您的账号名"
+            />
 
             {error && (
               <div className="p-3 bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-900 text-red-700 dark:text-red-300 text-xs font-mono">

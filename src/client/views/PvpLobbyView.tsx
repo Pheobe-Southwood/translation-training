@@ -15,28 +15,28 @@ import {
   Crown,
   X,
 } from 'lucide-react';
-import type {
-  ExamBank,
-  ExamCatalogEntry,
-  PvpRoomState,
-  TranslationDirection,
-} from '../../shared/types.js';
+import type { PvpRoomState, TranslationDirection } from '../../shared/types.js';
 import { directionLabel, directionShort } from '../../shared/direction.js';
 import { PvpSocket, type PvpConnectionStatus } from '../utils/pvpSocket.js';
 import { clearActivePvpRoom, setActivePvpRoom } from '../utils/storage.js';
 import { copyTextToClipboard } from '../utils/clipboard.js';
+import { useExamCatalog } from '../utils/useExamCatalog.js';
 import {
   EXAM_BANKS,
   EXAM_BANK_META,
-  entriesForYear,
-  fetchAllExamCatalogs,
-  inferBankFromExamId,
   isEnZhOnlyBank,
   paperSummary,
-  resolveInitialSelection,
-  uniqueYears,
   unitLabel,
 } from '../utils/exams.js';
+
+/** Shareable room URL; a spectate link carries its signed ticket in the hash. */
+function roomUrl(roomCode: string, spectateTicket?: string, spectate = false): string {
+  const base = `${window.location.origin}/#/pvp/${roomCode}`;
+  if (!spectate) return base;
+  return spectateTicket
+    ? `${base}?spectate=1&t=${encodeURIComponent(spectateTicket)}`
+    : `${base}?spectate=1`;
+}
 
 interface PvpLobbyViewProps {
   /** Canonical paper id selected on the homepage, e.g. `2004-reading-2`. */
@@ -71,15 +71,6 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
 }) => {
   const [mode, setMode] = useState<'create' | 'join'>(initialRoomCode ? 'join' : 'create');
   const [roomCodeInput, setRoomCodeInput] = useState(initialRoomCode || '');
-  const [bank, setBank] = useState<ExamBank>(() => inferBankFromExamId(initialExamId));
-  const [selectedYear, setSelectedYear] = useState<number | null>(null);
-  const [selectedUnitId, setSelectedUnitId] = useState<string | null>(null);
-  const [catalogs, setCatalogs] = useState<Record<ExamBank, ExamCatalogEntry[]>>({
-    translation: [],
-    cloze: [],
-    reading: [],
-  });
-  const [catalogLoading, setCatalogLoading] = useState(false);
   const [direction, setDirection] = useState<TranslationDirection>(initialDirection);
   const [durationMinutes, setDurationMinutes] = useState<number>(15);
   const [maxPlayers, setMaxPlayers] = useState<number>(2);
@@ -90,9 +81,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
 
   // Active connected room state
   const [currentRoom, setCurrentRoom] = useState<PvpRoomState | null>(null);
-  const [copiedLink, setCopiedLink] = useState(false);
-  const [copiedSpectateLink, setCopiedSpectateLink] = useState(false);
-  const [copiedCode, setCopiedCode] = useState(false);
+  const [copied, setCopied] = useState<'link' | 'spectate' | 'code' | null>(null);
   const [countdownNum, setCountdownNum] = useState<number | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<PvpConnectionStatus>('idle');
   const [connectionMessage, setConnectionMessage] = useState<string | undefined>(undefined);
@@ -102,12 +91,24 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
   const socketTicketRef = useRef<string | undefined>(undefined);
   const handedOffRef = useRef(false);
   const onStartMatchRef = useRef(onStartMatch);
-  /** Room this view is showing. Any room:state for another room is dropped. */
-  const boundRoomCodeRef = useRef<string | undefined>(undefined);
 
   /** Link spectator: read-only, no account needed, ticket carries the authority. */
   const isSpectateLinkViewer = initialSpectate && !!spectateTicket;
   const isMissingSpectateTicket = initialSpectate && !spectateTicket;
+
+  const {
+    bank,
+    years,
+    selectedYear,
+    unitEntries,
+    selectedEntry,
+    enZhOnly,
+    effectiveDirection,
+    loading: catalogLoading,
+    selectBank,
+    selectYear,
+    selectUnit,
+  } = useExamCatalog(initialExamId, direction, !isSpectateLinkViewer && !isMissingSpectateTicket);
 
   const getSocket = (): PvpSocket => {
     const ticket = isSpectateLinkViewer ? spectateTicket : undefined;
@@ -128,28 +129,6 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
     onStartMatchRef.current = onStartMatch;
   }, [onStartMatch]);
 
-  useEffect(() => {
-    // A read-only viewer never needs the exam list (and has no credentials for it).
-    if (isSpectateLinkViewer || isMissingSpectateTicket) return;
-    let cancelled = false;
-    setCatalogLoading(true);
-    fetchAllExamCatalogs().then((loaded) => {
-      if (cancelled) return;
-      setCatalogs(loaded);
-      const selection = resolveInitialSelection(loaded, initialExamId);
-      if (selection) {
-        setBank(selection.bank);
-        setSelectedYear(selection.year);
-        setSelectedUnitId(selection.examId);
-      }
-      setCatalogLoading(false);
-    });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isSpectateLinkViewer, isMissingSpectateTicket, initialExamId]);
-
   // Own the resilient websocket. It survives the hand-off to the live match view
   // (handedOffRef), and is closed when the player leaves the lobby for good.
   useEffect(() => {
@@ -159,14 +138,6 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
       switch (msg.type) {
         case 'room:state': {
           const room = msg.payload as PvpRoomState;
-          const bound = boundRoomCodeRef.current;
-          if (bound && room.roomCode !== bound) {
-            // Abandoned rooms used to broadcast into live sockets and reset the
-            // view to question 1. Never let a foreign room frame reach the UI.
-            console.warn(`[PVP] Lobby ignoring room:state for ${room.roomCode} (bound to ${bound})`);
-            break;
-          }
-          boundRoomCodeRef.current = room.roomCode;
           socket.setRoomCode(room.roomCode);
           setCurrentRoom(room);
           setLoading(false);
@@ -234,7 +205,6 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
 
     console.log(`[PVP] Auto-joining room ${code} (spectate=${initialSpectate}, ticket=${!!spectateTicket})`);
     setLoading(true);
-    boundRoomCodeRef.current = code;
     const socket = getSocket();
     socket.setRoomCode(code);
     socket.connect(code);
@@ -245,31 +215,6 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialRoomCode, autoJoin, initialSpectate, spectateTicket]);
 
-  // --- Paper picker state (three banks, 3–5 sentences per paper) ---
-  const bankEntries = catalogs[bank];
-  const years = uniqueYears(bankEntries);
-  const unitEntries = entriesForYear(bankEntries, selectedYear);
-  const selectedEntry =
-    unitEntries.find((entry) => entry.examId === selectedUnitId) || unitEntries[0] || null;
-  const enZhOnly = isEnZhOnlyBank(bank);
-  /** Cloze/reading only ship English→Chinese, so the lobby locks the direction. */
-  const effectiveDirection: TranslationDirection = enZhOnly ? 'en-zh' : direction;
-
-  const handleBankSelect = (nextBank: ExamBank) => {
-    setBank(nextBank);
-    const nextEntries = catalogs[nextBank];
-    const nextYears = uniqueYears(nextEntries);
-    const nextYear =
-      selectedYear !== null && nextYears.includes(selectedYear) ? selectedYear : nextYears[0] ?? null;
-    setSelectedYear(nextYear);
-    setSelectedUnitId(entriesForYear(nextEntries, nextYear)[0]?.examId ?? null);
-  };
-
-  const handleYearSelect = (year: number) => {
-    setSelectedYear(year);
-    setSelectedUnitId(entriesForYear(bankEntries, year)[0]?.examId ?? null);
-  };
-
   const handleCreateRoom = () => {
     if (!selectedEntry) {
       setError('题库加载中，请稍后重试');
@@ -278,8 +223,6 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
     setError(null);
     setSpectatorNotice(null);
     setLoading(true);
-    // A brand new room binds itself when its first state frame arrives.
-    boundRoomCodeRef.current = undefined;
     const socket = getSocket();
     socket.setRoomCode(undefined);
     socket.connect();
@@ -309,7 +252,6 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
     setError(null);
     setSpectatorNotice(null);
     setLoading(true);
-    boundRoomCodeRef.current = code;
     const socket = getSocket();
     socket.setRoomCode(code);
     socket.connect(code);
@@ -365,9 +307,14 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
     });
   };
 
+  const markCopied = (kind: 'link' | 'spectate' | 'code') => {
+    setCopied(kind);
+    setTimeout(() => setCopied(null), 2500);
+  };
+
   const handleCopyLink = async () => {
     if (!currentRoom) return;
-    const url = `${window.location.origin}/#/pvp/${currentRoom.roomCode}`;
+    const url = roomUrl(currentRoom.roomCode);
     if (
       typeof navigator !== 'undefined' &&
       navigator.share &&
@@ -385,33 +332,20 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
       }
     }
     const success = await copyTextToClipboard(url);
-    if (success) {
-      setCopiedLink(true);
-      setTimeout(() => setCopiedLink(false), 2500);
-    }
+    if (success) markCopied('link');
   };
 
   const handleCopySpectateLink = async () => {
     if (!currentRoom) return;
-    // The ticket lives in the URL fragment (never sent to the server) and is what
-    // lets a friend watch without an account while staying strictly read-only.
-    const ticket = currentRoom.spectateTicket;
-    const query = ticket ? `?spectate=1&t=${encodeURIComponent(ticket)}` : '?spectate=1';
-    const url = `${window.location.origin}/#/pvp/${currentRoom.roomCode}${query}`;
+    const url = roomUrl(currentRoom.roomCode, currentRoom.spectateTicket, true);
     const success = await copyTextToClipboard(url);
-    if (success) {
-      setCopiedSpectateLink(true);
-      setTimeout(() => setCopiedSpectateLink(false), 2500);
-    }
+    if (success) markCopied('spectate');
   };
 
   const handleCopyCode = async () => {
     if (!currentRoom) return;
     const success = await copyTextToClipboard(currentRoom.roomCode);
-    if (success) {
-      setCopiedCode(true);
-      setTimeout(() => setCopiedCode(false), 2500);
-    }
+    if (success) markCopied('code');
   };
 
   const handleLeaveRoom = () => {
@@ -422,7 +356,6 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
       socketRef.current = null;
     }
     clearActivePvpRoom();
-    boundRoomCodeRef.current = undefined;
     setCurrentRoom(null);
     setCountdownNum(null);
     setSpectatorNotice(null);
@@ -437,7 +370,6 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
       socket.close();
       socketRef.current = null;
     }
-    boundRoomCodeRef.current = undefined;
     onBack();
   };
 
@@ -541,12 +473,8 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
     const roomSegmentCount = currentRoom.exam?.translationSegments?.length || 5;
     const roomMaxScore = currentRoom.exam?.maxScore || roomSegmentCount * 2;
     const roomEnZhOnly = isEnZhOnlyBank(roomBank);
-    const inviteUrl = `${window.location.origin}/#/pvp/${currentRoom.roomCode}`;
-    const spectateUrl = currentRoom.spectateTicket
-      ? `${window.location.origin}/#/pvp/${currentRoom.roomCode}?spectate=1&t=${encodeURIComponent(
-          currentRoom.spectateTicket
-        )}`
-      : `${window.location.origin}/#/pvp/${currentRoom.roomCode}?spectate=1`;
+    const inviteUrl = roomUrl(currentRoom.roomCode);
+    const spectateUrl = roomUrl(currentRoom.roomCode, currentRoom.spectateTicket, true);
 
     // Build ordered slots: put myPlayer first if I am a player, then other players, then null placeholders up to roomMaxPlayers
     const orderedPlayers = myPlayer
@@ -656,7 +584,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
                   onClick={handleCopyCode}
                   className="px-2.5 py-1.5 border border-zinc-400 dark:border-zinc-700 hover:border-swiss-black dark:hover:border-zinc-400 bg-zinc-50 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-200 text-xs font-mono font-bold transition-colors flex items-center gap-1 active:scale-[0.98]"
                 >
-                  {copiedCode ? (
+                  {copied === 'code' ? (
                     <>
                       <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
                       <span className="text-emerald-700 dark:text-emerald-400">已复制</span>
@@ -677,7 +605,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
                   onClick={handleCopyLink}
                   className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2.5 border-2 border-swiss-black dark:border-zinc-700 bg-swiss-black hover:bg-swiss-red dark:bg-zinc-100 dark:text-swiss-black dark:hover:bg-swiss-red dark:hover:text-white text-white font-mono text-xs font-bold uppercase tracking-wider transition-colors shadow-sm active:scale-[0.98]"
                 >
-                  {copiedLink ? (
+                  {copied === 'link' ? (
                     <>
                       <Check className="w-3.5 h-3.5 text-emerald-400 dark:text-emerald-600" />
                       <span>已复制参赛链接</span>
@@ -696,7 +624,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
                   onClick={handleCopySpectateLink}
                   className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2.5 border-2 border-blue-600 dark:border-blue-500 bg-blue-50 dark:bg-blue-950/50 hover:bg-blue-600 hover:text-white text-blue-700 dark:text-blue-300 font-mono text-xs font-bold uppercase tracking-wider transition-colors active:scale-[0.98]"
                 >
-                  {copiedSpectateLink ? (
+                  {copied === 'spectate' ? (
                     <>
                       <Check className="w-3.5 h-3.5" />
                       <span>已复制观战链接</span>
@@ -1149,7 +1077,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
                   <button
                     key={itemBank}
                     type="button"
-                    onClick={() => handleBankSelect(itemBank)}
+                    onClick={() => selectBank(itemBank)}
                     className={`py-2.5 px-2 border-2 text-left transition-all active:scale-[0.98] ${
                       bank === itemBank
                         ? 'border-swiss-red bg-swiss-black text-white dark:bg-zinc-100 dark:text-swiss-black'
@@ -1171,7 +1099,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
               </label>
               <select
                 value={selectedYear ?? ''}
-                onChange={(e) => handleYearSelect(parseInt(e.target.value, 10))}
+                onChange={(e) => selectYear(parseInt(e.target.value, 10))}
                 disabled={years.length === 0}
                 className="w-full border-2 border-swiss-black dark:border-zinc-700 px-3.5 py-2.5 font-mono text-sm bg-white dark:bg-zinc-800 text-swiss-black dark:text-zinc-100 focus:outline-none disabled:opacity-50"
               >
@@ -1201,7 +1129,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
                     <button
                       key={entry.examId}
                       type="button"
-                      onClick={() => setSelectedUnitId(entry.examId)}
+                      onClick={() => selectUnit(entry.examId)}
                       className={`py-2 px-2 border-2 text-center transition-all active:scale-[0.98] ${
                         selectedEntry?.examId === entry.examId
                           ? 'border-swiss-red bg-rose-50 dark:bg-rose-950/40 text-swiss-red dark:text-rose-400'

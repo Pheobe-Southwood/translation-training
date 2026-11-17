@@ -1,30 +1,20 @@
 import React, { useState, useEffect, useRef } from 'react';
-import {
-  ArrowLeft,
-  Send,
-  Loader2,
-  CheckCircle2,
-  ChevronRight,
-  Trophy,
-  RotateCcw,
-  BookOpen,
-  ChevronDown,
-  ChevronUp,
-} from 'lucide-react';
+import { ArrowLeft, Loader2, Trophy, RotateCcw, BookOpen } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import type { TranslationExam, SegmentSubmission, HistorySessionRecord, TranslationDirection } from '../../shared/types.js';
 import { directionLabel, directionShort } from '../../shared/direction.js';
-import { getAuthToken, saveHistoryRecord } from '../utils/storage.js';
+import { getAuthToken, persistHistoryRecord } from '../utils/storage.js';
 import { paperPartLabel } from '../utils/exams.js';
 import { playSuccessSound } from '../utils/sound.js';
 import { GradingCard } from '../components/GradingCard.js';
+import { AnswerCard, PrevGradingBar } from '../components/AnswerCard.js';
+import { PassageAccordion } from '../components/HighlightedPassage.js';
 
 interface SoloViewProps {
   /** Canonical paper id, e.g. `2024-translation` / `2004-reading-2`. */
   examId: string;
   direction: TranslationDirection;
   onBack: () => void;
-  onFinishSession?: () => void;
 }
 
 export const SoloView: React.FC<SoloViewProps> = ({ examId, direction, onBack }) => {
@@ -167,7 +157,6 @@ export const SoloView: React.FC<SoloViewProps> = ({ examId, direction, onBack })
         [segmentIndex]: {
           ...prev[segmentIndex],
           gradingStatus: 'error' as const,
-          error: err.message || '评分超时，请重试',
         },
       }));
     }
@@ -201,23 +190,7 @@ export const SoloView: React.FC<SoloViewProps> = ({ examId, direction, onBack })
           timeSpentSeconds: Math.floor((Date.now() - startTime) / 1000),
           submissions: Object.values(submissions),
         };
-        saveHistoryRecord(record);
-        // Persist to online server database
-        try {
-          const token = getAuthToken();
-          if (token) {
-            fetch('/api/history', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${token}`,
-              },
-              body: JSON.stringify({ record }),
-            }).catch((e) => console.error('Failed to post history to server:', e));
-          }
-        } catch (e) {
-          console.error(e);
-        }
+        persistHistoryRecord(record);
         playSuccessSound();
         try {
           confetti({ particleCount: 80, spread: 70, origin: { y: 0.6 } });
@@ -225,35 +198,6 @@ export const SoloView: React.FC<SoloViewProps> = ({ examId, direction, onBack })
       }
     }
   }, [submissions, isAllCompleted, exam, examId, direction, startTime]);
-
-  const renderPassageWithHighlight = (passage: string, activeSentence: string) => {
-    if (!passage) return null;
-    if (!activeSentence) {
-      return <div className="whitespace-pre-line leading-relaxed text-zinc-700 dark:text-zinc-300">{passage}</div>;
-    }
-
-    const trimmedTarget = activeSentence.trim();
-    const parts = passage.split(trimmedTarget);
-
-    if (parts.length <= 1) {
-      return <div className="whitespace-pre-line leading-relaxed text-zinc-700 dark:text-zinc-300">{passage}</div>;
-    }
-
-    return (
-      <div className="whitespace-pre-line leading-relaxed text-zinc-700 dark:text-zinc-300 text-sm md:text-base font-serif">
-        {parts.map((part, i) => (
-          <React.Fragment key={i}>
-            <span>{part}</span>
-            {i < parts.length - 1 && (
-              <span className="bg-rose-100/90 dark:bg-rose-950/80 text-swiss-black dark:text-rose-200 font-semibold border-l-4 border-swiss-red px-1 py-0.5 shadow-sm">
-                {trimmedTarget}
-              </span>
-            )}
-          </React.Fragment>
-        ))}
-      </div>
-    );
-  };
 
   if (loading) {
     return (
@@ -302,9 +246,6 @@ export const SoloView: React.FC<SoloViewProps> = ({ examId, direction, onBack })
     Object.values(submissions).every(
       (s) => s.gradingStatus === 'graded' || s.gradingStatus === 'error'
     );
-
-  const paddedCount = String(segmentCount).padStart(2, '0');
-  const paddedIdx = String(currentIdx + 1).padStart(2, '0');
 
   return (
     <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-3 sm:py-8 space-y-4 sm:space-y-6">
@@ -369,102 +310,35 @@ export const SoloView: React.FC<SoloViewProps> = ({ examId, direction, onBack })
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 sm:gap-6 items-start">
           {/* Active Target Sentence & Input Box (Desktop Right 5 cols, Mobile TOP 12 cols) */}
           <div className="lg:col-span-5 lg:order-2 space-y-4">
-            <div className="border-2 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-900 p-4 sm:p-6 shadow-[4px_4px_0px_0px_#09090b] dark:shadow-[4px_4px_0px_0px_#000000] space-y-3.5">
-              {/* Target Segment Header */}
-              <div className="flex items-center justify-between pb-2 border-b-2 border-swiss-black dark:border-zinc-700">
-                <div className="flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 bg-swiss-red"></span>
-                  <span className="font-mono text-xs font-bold uppercase tracking-wider text-swiss-black dark:text-zinc-100">
-                    {isZhEn ? '本题待译中文原句' : '本题待译长难句'} [{paddedIdx} / {paddedCount}]
-                  </span>
-                </div>
-                <span className="font-mono text-xs font-bold text-zinc-400 dark:text-zinc-500">满分 2.0 分</span>
-              </div>
-
-              {/* Target Segment English Content */}
-              <div className={`p-3 sm:p-4 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-300 dark:border-zinc-700 ${isZhEn ? 'font-zh' : 'font-serif'} text-sm sm:text-base md:text-lg leading-relaxed text-zinc-900 dark:text-zinc-100 selection:bg-swiss-red selection:text-white`}>
-                {currentSegment}
-              </div>
-
-              {/* Input Area */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between font-mono text-xs text-zinc-500 dark:text-zinc-400">
-                  <label htmlFor="answer-input" className="font-bold uppercase text-[11px]">
-                    {isZhEn ? '输入您的英文翻译：' : '输入您的中文翻译：'}
-                  </label>
-                  <span className="text-[10px] hidden sm:inline">Ctrl + Enter 快捷提交</span>
-                </div>
-                <textarea
-                  id="answer-input"
-                  ref={textareaRef}
-                  value={currentAnswer}
-                  onChange={(e) => setCurrentAnswer(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.ctrlKey && e.key === 'Enter') {
-                      handleConfirmSubmit();
-                    }
-                  }}
-                  rows={4}
-                  placeholder={isZhEn ? '在此输入英文翻译...' : '在此输入中文翻译...'}
-                  className="w-full border-2 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-800 p-3 font-sans text-base sm:text-sm focus:outline-none focus:border-swiss-red dark:focus:border-swiss-red transition-colors placeholder:text-zinc-400 dark:placeholder:text-zinc-500 text-swiss-black dark:text-zinc-100 resize-none leading-relaxed"
-                />
-              </div>
-
-              {/* Submit CTA */}
-              <button
-                onClick={handleConfirmSubmit}
-                disabled={!currentAnswer.trim()}
-                className="w-full min-h-[48px] py-3.5 bg-swiss-black hover:bg-swiss-red dark:bg-zinc-100 dark:text-swiss-black dark:hover:bg-swiss-red dark:hover:text-white text-white font-mono text-xs font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-2 disabled:opacity-40 disabled:hover:bg-swiss-black dark:disabled:hover:bg-zinc-100 active:scale-[0.99]"
-              >
-                <span>
-                  确认提交第 {currentIdx + 1} 题，进入下一句 (
-                  {currentIdx === segmentCount - 1
-                    ? '交卷结算'
-                    : `${String(currentIdx + 2).padStart(2, '0')}/${paddedCount}`})
-                </span>
-                <Send className="w-4 h-4" />
-              </button>
-            </div>
+            <AnswerCard
+              inputId="answer-input"
+              direction={direction}
+              segmentNumber={currentIdx + 1}
+              segmentCount={segmentCount}
+              segmentText={currentSegment}
+              value={currentAnswer}
+              onChange={setCurrentAnswer}
+              onSubmit={handleConfirmSubmit}
+              textareaRef={textareaRef}
+              placeholder={isZhEn ? '在此输入英文翻译...' : '在此输入中文翻译...'}
+              finishLabel="交卷结算"
+              disabled={!currentAnswer.trim()}
+            />
           </div>
 
           {/* Passage Context & Previous Scoring (Desktop Left 7 cols, Mobile BOTTOM 12 cols) */}
           <div className="lg:col-span-7 lg:order-1 space-y-4">
             {/* Asynchronous Grading Feedback Bar for Previous Question */}
             {currentIdx > 0 && submissions[currentIdx - 1] && (
-              <div className="border-2 border-swiss-black dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/80 p-3 sm:p-4 shadow-[4px_4px_0px_0px_#09090b] dark:shadow-[4px_4px_0px_0px_#000000] flex items-center justify-between">
-                <div className="flex items-center gap-2 font-mono text-xs">
-                  {submissions[currentIdx - 1].gradingStatus === 'grading' ? (
-                    <>
-                      <Loader2 className="w-4 h-4 text-amber-500 animate-spin shrink-0" />
-                      <span className="font-bold text-amber-700 dark:text-amber-400 text-xs">
-                        程序正在评阅上一句（第 {currentIdx} 题）...
-                      </span>
-                    </>
-                  ) : submissions[currentIdx - 1].gradingStatus === 'graded' ? (
-                    <>
-                      <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                      <span className="font-bold text-zinc-900 dark:text-zinc-100 text-xs">
-                        第 {currentIdx} 句出分：
-                      </span>
-                      <span className="bg-emerald-100 dark:bg-emerald-950/80 text-emerald-800 dark:text-emerald-300 font-bold px-1.5 py-0.5">
-                        +{submissions[currentIdx - 1].gradingResult?.score.toFixed(1)} 分
-                      </span>
-                    </>
-                  ) : (
-                    <span className="text-red-600 dark:text-red-400 font-bold text-xs">第 {currentIdx} 句评分异常</span>
-                  )}
-                </div>
-
-                <button
-                  onClick={() =>
-                    setActiveCardTab(activeCardTab === currentIdx - 1 ? null : currentIdx - 1)
-                  }
-                  className="font-mono text-xs font-bold text-swiss-black dark:text-zinc-200 hover:text-swiss-red dark:hover:text-swiss-red flex items-center gap-1 shrink-0 ml-2"
-                >
-                  {activeCardTab === currentIdx - 1 ? '收起点评' : '查看点评'}
-                  <ChevronRight className="w-3.5 h-3.5" />
-                </button>
-              </div>
+              <PrevGradingBar
+                variant="solo"
+                submission={submissions[currentIdx - 1]}
+                segmentNumber={currentIdx}
+                expanded={activeCardTab === currentIdx - 1}
+                onToggle={() =>
+                  setActiveCardTab(activeCardTab === currentIdx - 1 ? null : currentIdx - 1)
+                }
+              />
             )}
 
             {/* Expanded Grading Drawer if clicked */}
@@ -478,46 +352,26 @@ export const SoloView: React.FC<SoloViewProps> = ({ examId, direction, onBack })
               />
             )}
 
-            {/* Mobile Collapsible Passage Accordion / Desktop Persistent Card */}
-            <div className="border-2 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-900 shadow-[4px_4px_0px_0px_#09090b] dark:shadow-[4px_4px_0px_0px_#000000]">
-              {/* Header Toggle for Mobile */}
-              <div
-                onClick={() => setIsPassageOpenMobile(!isPassageOpenMobile)}
-                className="p-4 flex items-center justify-between border-b border-zinc-200 dark:border-zinc-800 cursor-pointer lg:cursor-default hover:bg-zinc-50 dark:hover:bg-zinc-800/40 transition-colors"
-              >
-                <div className="flex items-center gap-2">
-                  <BookOpen className="w-4 h-4 text-zinc-600 dark:text-zinc-400" />
-                  <span className="font-mono text-xs font-bold uppercase tracking-wider text-zinc-700 dark:text-zinc-200">
-                    {isZhEn ? 'CHINESE CONTEXT' : 'PASSAGE CONTEXT'} //{' '}
-                    {exam.bank === 'translation'
-                      ? `${exam.year} 年${isZhEn ? '中文语境' : '短文语境'}`
-                      : `${exam.year} 年 · ${paperPartLabel(exam)}`}
-                  </span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="font-mono text-[10px] bg-rose-100 dark:bg-rose-950/80 text-swiss-red dark:text-rose-200 border border-rose-300 dark:border-rose-800 px-2 py-0.5 font-bold uppercase hidden sm:inline">
-                    {isZhEn ? '中文题干 · 英文作答' : '红色标尺即为本题目标'}
-                  </span>
-                  <div className="text-zinc-500 dark:text-zinc-400 lg:hidden">
-                    {isPassageOpenMobile ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                  </div>
-                </div>
-              </div>
-
-              {/* Passage text: Persistent on desktop, toggleable on mobile */}
-              <div
-                className={`p-4 sm:p-6 leading-relaxed ${
-                  isPassageOpenMobile ? 'block' : 'hidden lg:block'
-                }`}
-              >
-                {renderPassageWithHighlight(exam.contentMarkdown, currentSegment)}
-                {isZhEn && (
+            <PassageAccordion
+              direction={direction}
+              contextTitle={
+                exam.bank === 'translation'
+                  ? `${exam.year} 年${isZhEn ? '中文语境' : '短文语境'}`
+                  : `${exam.year} 年 · ${paperPartLabel(exam)}`
+              }
+              badge={isZhEn ? '中文题干 · 英文作答' : '红色标尺即为本题目标'}
+              passage={exam.contentMarkdown}
+              activeSentence={currentSegment}
+              open={isPassageOpenMobile}
+              onToggle={() => setIsPassageOpenMobile(!isPassageOpenMobile)}
+              footer={
+                isZhEn ? (
                   <div className="mt-3 pt-2 border-t border-zinc-200 dark:border-zinc-700 font-mono text-[10px] text-zinc-500 dark:text-zinc-400">
                     语境为网络参考译文；若未高亮，以上方中文题干为准。
                   </div>
-                )}
-              </div>
-            </div>
+                ) : undefined
+              }
+            />
           </div>
         </div>
       ) : (

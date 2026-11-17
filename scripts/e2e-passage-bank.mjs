@@ -91,26 +91,29 @@ async function main() {
   log('registered test user');
 
   // --- bank catalogues ------------------------------------------------------
-  const clozeYears = await apiOk('/api/exams/years?bank=cloze', { headers: auth });
-  const readingYears = await apiOk('/api/exams/years?bank=reading', { headers: auth });
-  const translationYears = await apiOk('/api/exams/years', { headers: auth });
-  ok(Array.isArray(clozeYears.years) && clozeYears.years.length > 0, 'cloze years should be non-empty');
-  ok(Array.isArray(readingYears.years) && readingYears.years.length > 0, 'reading years should be non-empty');
-  ok(translationYears.years.length >= 25, 'translation years should still be present');
-  ok(
-    !clozeYears.years.some((y) => translationYears.years.length && false),
-    'sanity'
-  );
-
+  // The public API exposes paper rows only through the catalogue (there is no
+  // standalone years endpoint), so the year coverage is derived from the entries.
   const clozeCatalog = await apiOk('/api/exams/catalog?bank=cloze', { headers: auth });
   const readingCatalog = await apiOk('/api/exams/catalog?bank=reading', { headers: auth });
+  const translationCatalog = await apiOk('/api/exams/catalog?bank=translation', { headers: auth });
   const clozeEntries = clozeCatalog.exams || clozeCatalog.entries || clozeCatalog;
   const readingEntries = readingCatalog.exams || readingCatalog.entries || readingCatalog;
+  const translationEntries = translationCatalog.exams || translationCatalog.entries || translationCatalog;
   ok(Array.isArray(clozeEntries) && clozeEntries.length === bank.filter((u) => u.bank === 'cloze').length,
     'cloze catalogue length should match the committed bank');
   ok(Array.isArray(readingEntries) && readingEntries.length === bank.filter((u) => u.bank === 'reading').length,
     'reading catalogue length should match the committed bank');
+  ok(Array.isArray(translationEntries) && translationEntries.length > 0, 'translation catalogue should be non-empty');
   ok(clozeEntries.every((e) => e.bank === 'cloze' && !!e.partLabel), 'cloze entries carry bank + partLabel');
+
+  const catalogYears = (entries) =>
+    [...new Set((Array.isArray(entries) ? entries : []).map((entry) => entry.year))];
+  const clozeYears = catalogYears(clozeEntries);
+  const readingYears = catalogYears(readingEntries);
+  const translationYears = catalogYears(translationEntries);
+  ok(clozeYears.length > 0, 'cloze catalogue should cover at least one year');
+  ok(readingYears.length > 0, 'reading catalogue should cover at least one year');
+  ok(translationYears.length >= 25, 'translation catalogue should cover at least 25 distinct years');
 
   const badBank = await api('/api/exams/catalog?bank=nope', { headers: auth });
   eq(badBank.status, 400, 'unknown bank should be rejected with 400');
@@ -120,7 +123,6 @@ async function main() {
   const sample = bank.find((u) => u.translationSegments.length === 4) || bank[0];
   const exam = (await apiOk(`/api/exams/${sample.examId}`, { headers: auth })).exam;
   eq(exam.examId, sample.examId, 'exam payload should be keyed by examId');
-  eq(exam.id, sample.examId, 'legacy id should equal examId');
   ok(['cloze', 'reading'].includes(exam.bank), 'new bank paper should report its bank');
   eq(exam.translationSegments.length, sample.translationSegments.length, 'segment count should survive projection');
   eq(exam.maxScore, sample.translationSegments.length * 2, 'maxScore should be segmentCount * 2');
@@ -168,7 +170,8 @@ async function main() {
   eq(outOfRange.status, 404, 'segment index past the end must be rejected');
 
   // Legacy numeric-year links must keep working for the translation bank.
-  const legacyByYear = await api(`/api/exams/${translationYears.years[0]}`, { headers: auth });
+  const legacyYear = translationYears[0];
+  const legacyByYear = await api(`/api/exams/${legacyYear}`, { headers: auth });
   eq(legacyByYear.status, 200, 'numeric year must still resolve to the translation paper');
   eq(legacyByYear.data.exam.bank, 'translation', 'numeric year resolves to the translation bank');
 
@@ -176,7 +179,7 @@ async function main() {
     method: 'POST',
     headers: auth,
     body: JSON.stringify({
-      year: translationYears.years[0],
+      year: legacyYear,
       segmentIndex: 0,
       direction: 'en-zh',
       studentAnswer: '旧接口兼容测试译文。',

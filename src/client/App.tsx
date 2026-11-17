@@ -27,7 +27,6 @@ import {
 import type { PvpSocket } from './utils/pvpSocket.js';
 
 interface SpectateRoute {
-  roomCode: string;
   ticket?: string;
 }
 
@@ -125,7 +124,7 @@ export const App: React.FC = () => {
     if (!route) return;
     setInitialRoomCode(route.roomCode);
     setInitialSpectate(route.spectate);
-    setSpectateRoute(route.spectate ? { roomCode: route.roomCode, ticket: route.ticket } : null);
+    setSpectateRoute(route.spectate ? { ticket: route.ticket } : null);
     setAutoJoinRoom(false);
     setCurrentView('pvp-lobby');
   };
@@ -323,8 +322,6 @@ export const App: React.FC = () => {
             socket={pvpState.socket}
             playerId={playerId}
             onExit={handleExitMatch}
-            theme={theme}
-            onToggleTheme={handleToggleTheme}
           />
         )}
 

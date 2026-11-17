@@ -27,7 +27,6 @@ export interface ExamRecord {
   bank: ExamBank;
   partLabel: string;
   year: number;
-  title: string;
   maxScore: number;
   /** English full passage (used by English→Chinese). */
   contentMarkdown: string;
@@ -37,16 +36,7 @@ export interface ExamRecord {
   referencePassageMarkdown?: string;
   /** Web-researched Chinese target translations (used by Chinese→English). */
   referenceTranslations?: string[];
-  referenceSource?: {
-    name: string;
-    url: string;
-    accessedAt: string;
-  };
-  referenceSegmentSources?: ReferenceSegmentSource[];
-  referenceNotes?: string[];
 }
-
-export type ReferenceSegmentSource = 'web' | 'web-completed' | 'reviewed-fallback';
 
 export interface GradingMaterial {
   sourceText: string;
@@ -103,62 +93,32 @@ function defaultPartLabel(bank: ExamBank, examId: string): string {
 
 // --- Raw data loading -------------------------------------------------------
 
-function dataFileCandidates(fileName: string): string[] {
-  return [
-    path.resolve(process.cwd(), 'src/shared/data', fileName),
-    path.resolve(process.cwd(), 'dist/shared/data', fileName),
-    path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../shared/data', fileName),
-  ];
-}
-
 /**
- * Read one data file. `required` files (the original translation bank) abort
- * startup when unusable; optional files (the passage banks) degrade to an empty
- * list so an older deployment without `passage-bank.json` still boots.
+ * Read one data file from the directory next to the running module: `src/shared/data`
+ * under tsx and `dist/shared/data` after `pnpm build` (both are always shipped).
  */
-function readDataFile(fileName: string, required: boolean): unknown[] {
-  let found = false;
-  for (const candidate of dataFileCandidates(fileName)) {
-    if (!fs.existsSync(candidate)) continue;
-    found = true;
-    try {
-      const parsed: unknown = JSON.parse(fs.readFileSync(candidate, 'utf-8'));
-      if (!Array.isArray(parsed)) throw new Error('root value is not an array');
-      if (required && parsed.length === 0) throw new Error('file is empty');
-      console.log(`[examService] Loaded ${parsed.length} raw records from ${candidate}`);
-      return parsed;
-    } catch (err) {
-      console.error(`[examService] Error reading ${candidate}:`, err);
-    }
+function readDataFile(fileName: string): unknown[] {
+  const candidate = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '../shared/data',
+    fileName
+  );
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(candidate, 'utf-8'));
+  } catch (err) {
+    throw new Error(`Unable to load ${candidate}: ${String(err)}`);
   }
-
-  if (required) throw new Error(`Unable to find or load ${fileName}`);
-  if (found) {
-    console.warn(`[examService] Ignoring unusable ${fileName}; continuing with an empty passage bank`);
-  } else {
-    console.log(`[examService] ${fileName} not found; continuing with an empty passage bank`);
-  }
-  return [];
+  if (!Array.isArray(parsed)) throw new Error(`${candidate}: root value is not an array`);
+  if (parsed.length === 0) throw new Error(`${candidate}: file is empty`);
+  console.log(`[examService] Loaded ${parsed.length} raw records from ${candidate}`);
+  return parsed;
 }
 
 // --- Normalisation ----------------------------------------------------------
 
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
-
-function isReferenceSegmentSource(value: unknown): value is ReferenceSegmentSource {
-  return value === 'web' || value === 'web-completed' || value === 'reviewed-fallback';
-}
-
-function normalizeReferenceSource(value: unknown): ExamRecord['referenceSource'] {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const raw = value as Record<string, unknown>;
-  const name = nonEmptyString(raw.name);
-  const url = nonEmptyString(raw.url);
-  const accessedAt = nonEmptyString(raw.accessedAt);
-  if (!name || !url || !accessedAt) return undefined;
-  return { name, url, accessedAt };
 }
 
 /**
@@ -201,7 +161,6 @@ function normalizeExamRecord(raw: Record<string, unknown>, source: string): Exam
     TRANSLATION_BANK;
   const examId = explicitExamId ?? `${year}-${bank}`;
   const partLabel = nonEmptyString(raw.partLabel) ?? defaultPartLabel(bank, examId);
-  const title = nonEmptyString(raw.title) ?? `${year} 年${partLabel}`;
 
   // Preserve positions so referenceTranslations stays index-aligned with the
   // target sentences; missing/blank entries become empty strings.
@@ -209,29 +168,17 @@ function normalizeExamRecord(raw: Record<string, unknown>, source: string): Exam
     ? raw.referenceTranslations.map((value) => (typeof value === 'string' ? value.trim() : ''))
     : undefined;
 
-  const referenceSegmentSources = Array.isArray(raw.referenceSegmentSources)
-    ? raw.referenceSegmentSources.filter(isReferenceSegmentSource)
-    : undefined;
-
-  const referenceNotes = Array.isArray(raw.referenceNotes)
-    ? raw.referenceNotes.filter((note): note is string => typeof note === 'string' && !!note.trim())
-    : undefined;
-
   return {
     examId,
     bank,
     partLabel,
     year,
-    title,
     // One target sentence is worth 2 points; papers now have 3–5 sentences.
     maxScore: segments.length * 2,
     contentMarkdown,
     translationSegments: segments,
     referencePassageMarkdown: nonEmptyString(raw.referencePassageMarkdown),
     referenceTranslations,
-    referenceSource: normalizeReferenceSource(raw.referenceSource),
-    referenceSegmentSources,
-    referenceNotes,
   };
 }
 
@@ -243,24 +190,12 @@ function loadExamRecords(): ExamRecord[] {
   if (cachedRecords) return cachedRecords;
 
   const records: ExamRecord[] = [];
-  const seen = new Map<string, string>();
 
   for (const fileName of [TRANSLATION_DATA_FILE, PASSAGE_DATA_FILE]) {
-    const rawRecords = readDataFile(fileName, fileName === TRANSLATION_DATA_FILE);
-    for (const item of rawRecords) {
+    for (const item of readDataFile(fileName)) {
       if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
       const record = normalizeExamRecord(item as Record<string, unknown>, fileName);
-      if (!record) continue;
-
-      const existingSource = seen.get(record.examId);
-      if (existingSource) {
-        console.warn(
-          `[examService] Duplicate examId ${record.examId} in ${fileName} (already loaded from ${existingSource}); keeping the first`
-        );
-        continue;
-      }
-      seen.set(record.examId, fileName);
-      records.push(record);
+      if (record) records.push(record);
     }
   }
 
@@ -295,7 +230,9 @@ function toPublicExam(
   record: ExamRecord,
   direction: TranslationDirection
 ): TranslationExam | undefined {
-  if (direction === 'zh-en') {
+  const isZhEn = direction === 'zh-en';
+
+  if (isZhEn) {
     if (record.bank !== TRANSLATION_BANK) return undefined;
     if (!record.referencePassageMarkdown || !Array.isArray(record.referenceTranslations)) {
       console.error(`[examService] ${record.examId} has no usable Chinese reference bank`);
@@ -308,32 +245,20 @@ function toPublicExam(
       console.error(`[examService] ${record.examId} has an incomplete Chinese reference bank`);
       return undefined;
     }
-
-    return {
-      examId: record.examId,
-      id: record.examId,
-      bank: record.bank,
-      partLabel: record.partLabel,
-      year: record.year,
-      title: `${record.title} · 中译英`,
-      maxScore: record.referenceTranslations.length * 2,
-      contentMarkdown: record.referencePassageMarkdown,
-      translationSegments: record.referenceTranslations,
-      direction: 'zh-en',
-    };
   }
 
+  const segments = isZhEn ? (record.referenceTranslations ?? []) : record.translationSegments;
   return {
     examId: record.examId,
-    id: record.examId,
     bank: record.bank,
     partLabel: record.partLabel,
     year: record.year,
-    title: record.title,
-    maxScore: record.translationSegments.length * 2,
-    contentMarkdown: record.contentMarkdown,
-    translationSegments: record.translationSegments,
-    direction: 'en-zh',
+    maxScore: segments.length * 2,
+    contentMarkdown: isZhEn
+      ? (record.referencePassageMarkdown ?? '')
+      : record.contentMarkdown,
+    translationSegments: segments,
+    direction,
   };
 }
 
@@ -367,7 +292,6 @@ export function getExamCatalog(bank: ExamBank = TRANSLATION_BANK): ExamCatalogEn
       bank: record.bank,
       year: record.year,
       partLabel: record.partLabel,
-      title: record.title,
       segmentCount: record.translationSegments.length,
       maxScore: record.translationSegments.length * 2,
     }));

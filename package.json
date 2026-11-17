@@ -19,11 +19,9 @@
     "build:passage-bank": "node scripts/build-passage-bank.mjs"
   },
   "dependencies": {
-    "@fastify/cors": "^10.0.1",
     "@fastify/static": "^8.1.0",
     "@fastify/websocket": "^11.0.1",
     "canvas-confetti": "^1.9.4",
-    "dotenv": "^16.4.7",
     "fastify": "^5.2.0",
     "lucide-react": "^0.475.0",
     "react": "^19.0.0",

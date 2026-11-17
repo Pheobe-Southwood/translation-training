@@ -16,7 +16,7 @@ export class SlidingWindowLimiter {
   ) {}
 
   /** Record one attempt and report whether the caller is still under the limit. */
-  consume(key: string): { allowed: boolean; retryAfterSec: number; remaining: number } {
+  consume(key: string): { allowed: boolean; retryAfterSec: number } {
     const now = Date.now();
     const cutoff = now - this.windowMs;
     const recent = (this.hits.get(key) || []).filter((ts) => ts > cutoff);
@@ -24,7 +24,7 @@ export class SlidingWindowLimiter {
     if (recent.length >= this.limit) {
       const retryAfterSec = Math.max(1, Math.ceil((recent[0] + this.windowMs - now) / 1000));
       this.hits.set(key, recent);
-      return { allowed: false, retryAfterSec, remaining: 0 };
+      return { allowed: false, retryAfterSec };
     }
 
     recent.push(now);
@@ -37,7 +37,7 @@ export class SlidingWindowLimiter {
       }
     }
 
-    return { allowed: true, retryAfterSec: 0, remaining: this.limit - recent.length };
+    return { allowed: true, retryAfterSec: 0 };
   }
 
   reset(key: string): void {
@@ -45,12 +45,11 @@ export class SlidingWindowLimiter {
   }
 }
 
-/** Normalised client address, safe to log and to use as a limiter key. */
-export function clientIp(req: { ip?: string; headers: Record<string, unknown> }): string {
-  const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string' && forwarded.length > 0) {
-    return forwarded.split(',')[0].trim();
-  }
+/**
+ * Client address for logging and limiter keys. Fastify's `trustProxy` option
+ * already resolves X-Forwarded-For into `req.ip`.
+ */
+export function clientIp(req: { ip?: string }): string {
   return req.ip || 'unknown';
 }
 

@@ -17,13 +17,10 @@ export interface TranslationExam {
    * A `year` alone is no longer unique: 2004 now has six papers.
    */
   examId: string;
-  /** Retained for older clients/records; always equal to `examId`. */
-  id: string;
   bank: ExamBank;
   /** Human label for the paper inside its bank, e.g. `完型填空`, `阅读理解 Text 2`. */
   partLabel: string;
   year: number; // 2004
-  title: string;
   /** `translationSegments.length * 2` — 3 segments => 6, 5 segments => 10. */
   maxScore: number;
   contentMarkdown: string; // Full passage markdown
@@ -38,7 +35,6 @@ export interface ExamCatalogEntry {
   bank: ExamBank;
   year: number;
   partLabel: string;
-  title: string;
   segmentCount: number;
   maxScore: number;
 }
@@ -56,7 +52,6 @@ export interface GradingResult {
   fluency_deduction: number;
   critique: string;
   reference_translation: string;
-  gradedAt: number; // timestamp
 }
 
 export interface SegmentSubmission {
@@ -66,7 +61,6 @@ export interface SegmentSubmission {
   gradingStatus: 'idle' | 'waiting_pair' | 'grading' | 'graded' | 'error';
   gradingResult?: GradingResult;
   comparativeAnalysis?: string;
-  error?: string;
   submittedAt?: number;
 }
 
@@ -96,26 +90,11 @@ export interface PlayerState {
   isHost: boolean;
   isReady: boolean;
   isOnline?: boolean;
-  lastActiveAt?: number;
   currentSegmentIndex: number; // 0..4
   submissions: Record<number, SegmentSubmission>;
   totalScore: number;
   isFinished: boolean;
   finishedAt?: number;
-}
-
-export interface PvpRoomSummary {
-  roomCode: string;
-  year: number;
-  examId: string;
-  bank: ExamBank;
-  partLabel: string;
-  direction?: TranslationDirection;
-  durationMinutes: number;
-  status: RoomStatus;
-  playerCount: number;
-  maxPlayers: number;
-  spectatorCount: number;
 }
 
 export interface PvpRoomState {
@@ -139,7 +118,6 @@ export interface PvpRoomState {
   spectateTicket?: string;
   createdAt?: number;
   startedAt?: number;
-  countdownEndTime?: number;
   matchEndTime?: number;
   players: Record<string, PlayerState>;
   spectators: Record<string, SpectatorState>;
@@ -175,4 +153,3 @@ export interface AuthUser {
   username: string;
   nickname: string;
 }
-

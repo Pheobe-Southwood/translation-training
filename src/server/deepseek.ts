@@ -12,6 +12,33 @@ const THINKING_PARAMS = {
   reasoning_effort: CONFIG.deepseekReasoningEffort,
 } as const;
 
+/** POST one chat-completions payload and return the first choice's message. */
+async function callDeepSeek(payload: unknown, label: string): Promise<any> {
+  if (!CONFIG.deepseekApiKey) {
+    throw new Error('DEEPSEEK_API_KEY is not configured on server');
+  }
+
+  const response = await fetch(`${CONFIG.deepseekBaseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${CONFIG.deepseekApiKey}`,
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(CONFIG.deepseekRequestTimeoutMs),
+  });
+
+  if (!response.ok) {
+    throw new Error(`${label} (${response.status}): ${await response.text()}`);
+  }
+
+  const choice = (await response.json()).choices?.[0]?.message;
+  if (!choice) {
+    throw new Error('Invalid response structure from DeepSeek API');
+  }
+  return choice;
+}
+
 const EN_TO_ZH_SYSTEM_PROMPT = `你是一位英语翻译题的阅卷老师
 一、核心评分公式
 单句得分 = 采分点得分（0-2分） - 整句扭曲扣分 - 通顺度扣分。
@@ -261,13 +288,7 @@ export async function gradeTranslation(params: {
   studentAnswer: string;
   direction?: TranslationDirection;
   referenceAnswer?: string;
-  customApiKey?: string;
 }): Promise<GradingResult> {
-  const apiKey = params.customApiKey || CONFIG.deepseekApiKey;
-  if (!apiKey) {
-    throw new Error('DEEPSEEK_API_KEY is not configured on server');
-  }
-
   const direction = params.direction || DEFAULT_DIRECTION;
   const isZhEn = direction === 'zh-en';
   const userContent = isZhEn
@@ -286,26 +307,7 @@ export async function gradeTranslation(params: {
     stream: false,
   };
 
-  const response = await fetch(`${CONFIG.deepseekBaseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(CONFIG.deepseekRequestTimeoutMs),
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    throw new Error(`DeepSeek API request failed (${response.status}): ${errorBody}`);
-  }
-
-  const result = await response.json();
-  const choice = result.choices?.[0]?.message;
-  if (!choice) {
-    throw new Error('Invalid response structure from DeepSeek API');
-  }
+  const choice = await callDeepSeek(payload, 'DeepSeek API request failed');
 
   // Attempt 1: Extract from tool_calls
   if (choice.tool_calls && choice.tool_calls.length > 0) {
@@ -352,7 +354,6 @@ export async function gradeTranslation(params: {
     fluency_deduction: 0,
     critique: content || '未能解析阅卷评语',
     reference_translation: params.referenceAnswer || '未能获取参考译文',
-    gradedAt: Date.now(),
   };
 }
 
@@ -372,13 +373,7 @@ export async function gradePvpPairTranslation(params: {
   studentBName?: string;
   direction?: TranslationDirection;
   referenceAnswer?: string;
-  customApiKey?: string;
 }): Promise<PvpPairGradingResult> {
-  const apiKey = params.customApiKey || CONFIG.deepseekApiKey;
-  if (!apiKey) {
-    throw new Error('DEEPSEEK_API_KEY is not configured on server');
-  }
-
   const direction = params.direction || DEFAULT_DIRECTION;
   const isZhEn = direction === 'zh-en';
   const nameA = params.studentAName || '学生A';
@@ -400,26 +395,7 @@ export async function gradePvpPairTranslation(params: {
     stream: false,
   };
 
-  const response = await fetch(`${CONFIG.deepseekBaseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(CONFIG.deepseekRequestTimeoutMs),
-  });
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    throw new Error(`DeepSeek API PVP pair request failed (${response.status}): ${errorBody}`);
-  }
-
-  const result = await response.json();
-  const choice = result.choices?.[0]?.message;
-  if (!choice) {
-    throw new Error('Invalid response structure from DeepSeek API');
-  }
+  const choice = await callDeepSeek(payload, 'DeepSeek API PVP pair request failed');
 
   if (choice.tool_calls && choice.tool_calls.length > 0) {
     for (const toolCall of choice.tool_calls) {
@@ -468,7 +444,6 @@ export async function gradePvpPairTranslation(params: {
       studentAnswer: params.studentAAnswer,
       direction,
       referenceAnswer: params.referenceAnswer,
-      customApiKey: apiKey,
     }),
     gradeTranslation({
       fullArticle: params.fullArticle,
@@ -476,7 +451,6 @@ export async function gradePvpPairTranslation(params: {
       studentAnswer: params.studentBAnswer,
       direction,
       referenceAnswer: params.referenceAnswer,
-      customApiKey: apiKey,
     }),
   ]);
 
@@ -537,6 +511,5 @@ function normalizeGradingResult(
     critique: String(raw.critique || '暂无评语'),
     reference_translation:
       opts?.referenceAnswer || String(raw.reference_translation || ''),
-    gradedAt: Date.now(),
   };
 }

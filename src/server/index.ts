@@ -1,5 +1,4 @@
 import Fastify from 'fastify';
-import fastifyCors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import fs from 'fs';
@@ -18,7 +17,6 @@ import { db } from './db.js';
 import {
   getExamById,
   getExamCatalog,
-  getExamYears,
   getGradingMaterial,
   getRandomExam,
   parseExamBank,
@@ -76,6 +74,12 @@ function parseBankQuery(query: unknown): { bank: ExamBank } | { error: string } 
   return { bank };
 }
 
+/** Bearer token from the Authorization header; clients never use any other header. */
+function bearerToken(req: { headers: { authorization?: string } }): string | undefined {
+  const authHeader = req.headers.authorization;
+  return authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+}
+
 const escapeHtml = (value: string): string =>
   value.replace(/[&<>"']/g, (char) =>
     char === '&' ? '&amp;' : char === '<' ? '&lt;' : char === '>' ? '&gt;' : char === '"' ? '&quot;' : '&#39;'
@@ -111,15 +115,6 @@ function renderLegalPage(template: string): string {
 }
 
 async function main() {
-  // Same-origin is the only supported deployment; only register CORS when an
-  // operator explicitly whitelists extra origins (never reflect arbitrary ones).
-  if (CONFIG.allowedOrigins.length > 0) {
-    await app.register(fastifyCors, {
-      origin: CONFIG.allowedOrigins,
-      credentials: true,
-    });
-  }
-
   await app.register(fastifyWebsocket);
 
   // Runtime site identity: keeps the ICP filing number out of the public repo.
@@ -406,12 +401,7 @@ async function main() {
 
   // 3. Auth Check API
   app.get('/api/auth/check', async (req, reply) => {
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.startsWith('Bearer ')
-      ? authHeader.slice(7)
-      : (req.headers['x-site-token'] as string);
-
-    const verified = verifyUserToken(token);
+    const verified = verifyUserToken(bearerToken(req));
     if (!verified) {
       return reply.status(401).send({ authenticated: false });
     }
@@ -441,12 +431,7 @@ async function main() {
       return;
     }
 
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.startsWith('Bearer ')
-      ? authHeader.slice(7)
-      : (req.headers['x-site-token'] as string);
-
-    const verified = verifyUserToken(token);
+    const verified = verifyUserToken(bearerToken(req));
     if (!verified) {
       return reply.status(401).send({ error: 'Unauthorized: 请先登录账号' });
     }
@@ -556,12 +541,6 @@ async function main() {
   });
 
   // --- Exam APIs ---
-  app.get('/api/exams/years', async (req, reply) => {
-    const bankQuery = parseBankQuery(req.query);
-    if ('error' in bankQuery) return reply.status(400).send({ error: bankQuery.error });
-    return { years: getExamYears(bankQuery.bank) };
-  });
-
   /** One row per paper in the requested bank, for the paper picker. */
   app.get('/api/exams/catalog', async (req, reply) => {
     const bankQuery = parseBankQuery(req.query);

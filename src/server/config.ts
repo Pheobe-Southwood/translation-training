@@ -1,32 +1,27 @@
-import dotenv from 'dotenv';
 import path from 'path';
 import crypto from 'crypto';
 
-dotenv.config();
+// Node's built-in .env loader (Node 20.12+/22). CI and systemd inject the
+// environment directly, so a missing .env file is not an error.
+try {
+  process.loadEnvFile();
+} catch {
+  // No .env next to the working directory: the process environment is authoritative.
+}
 
 /**
  * Thinking-mode effort sent to DeepSeek.
  *
  * `max` is the top tier of the documented effort ladder
  * (`minimal|low|medium|high|xhigh|max|ultra` -> `low|low|high|high|high|max|max`).
- * Grading is the product's core quality gate, so it runs at full reasoning depth;
- * `DEEPSEEK_REASONING_EFFORT` can lower it without a code change. Kept in one place
- * so both grading entry points, the startup log and the deployed bundle can be
- * verified against the same value.
+ * Grading is the product's core quality gate, so it always runs at full reasoning depth.
  */
-const DEEPSEEK_EFFORTS = ['low', 'high', 'max'] as const;
-type DeepSeekEffort = (typeof DEEPSEEK_EFFORTS)[number];
-
-function resolveDeepSeekEffort(): DeepSeekEffort {
-  const raw = (process.env.DEEPSEEK_REASONING_EFFORT || '').trim().toLowerCase();
-  return (DEEPSEEK_EFFORTS as readonly string[]).includes(raw) ? (raw as DeepSeekEffort) : 'max';
-}
+const DEEPSEEK_REASONING_EFFORT = 'max' as const;
 
 /**
  * Budget for a single grading request. Max-effort reasoning takes noticeably longer
  * than lower tiers, so this is deliberately generous; the PVP end-of-match guardrail
- * is derived from it below to keep the two in sync (previously they were unrelated
- * magic numbers, and a short request timeout could strand a finished match).
+ * is derived from it below to keep the two in sync.
  */
 const DEEPSEEK_REQUEST_TIMEOUT_MS = 150_000;
 
@@ -35,19 +30,13 @@ export const CONFIG = {
   host: process.env.HOST || '0.0.0.0',
   nodeEnv: process.env.NODE_ENV || 'development',
   invitationCode: process.env.INVITATION_CODE || process.env.SITE_PASSWORD || 'tt8888',
-  sitePassword: process.env.INVITATION_CODE || process.env.SITE_PASSWORD || 'tt8888', // Backwards compatibility
   deepseekApiKey: process.env.DEEPSEEK_API_KEY || '',
   deepseekBaseUrl: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
-  deepseekReasoningEffort: resolveDeepSeekEffort(),
+  deepseekReasoningEffort: DEEPSEEK_REASONING_EFFORT,
   deepseekRequestTimeoutMs: DEEPSEEK_REQUEST_TIMEOUT_MS,
   /** Grace period after the last in-flight grading call before a match is force-closed. */
   pvpGradingGuardrailMs: DEEPSEEK_REQUEST_TIMEOUT_MS + 30_000,
   staticDir: path.resolve(process.cwd(), 'dist/client'),
-  /** Public origin(s) allowed to call the API from a browser. Same-origin needs none. */
-  allowedOrigins: (process.env.CORS_ORIGINS || '')
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean),
   /**
    * HMAC secret for login and spectate tokens. Set AUTH_SECRET in production so
    * tokens survive restarts; the derived fallback only exists for local dev.

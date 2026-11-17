@@ -16,6 +16,63 @@ const STORAGE_KEYS = {
 export type AppTheme = 'light' | 'dark';
 
 /**
+ * Guarded storage access.
+ *
+ * localStorage/sessionStorage can be missing or throw (private mode, disabled
+ * storage, quota), so every read/write goes through these helpers instead of
+ * repeating a try/catch in each accessor.
+ */
+type StoreKind = 'local' | 'session';
+
+function resolveStore(kind: StoreKind): Storage | null {
+  try {
+    return kind === 'local' ? localStorage : sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+function readRaw(kind: StoreKind, key: string): string | null {
+  const store = resolveStore(kind);
+  if (!store) return null;
+  try {
+    return store.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeRaw(kind: StoreKind, key: string, value: string): void {
+  const store = resolveStore(kind);
+  if (!store) return;
+  try {
+    store.setItem(key, value);
+  } catch {}
+}
+
+function removeRaw(kind: StoreKind, key: string): void {
+  const store = resolveStore(kind);
+  if (!store) return;
+  try {
+    store.removeItem(key);
+  } catch {}
+}
+
+function readJson<T>(kind: StoreKind, key: string, fallback: T): T {
+  const raw = readRaw(kind, key);
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJson(kind: StoreKind, key: string, value: unknown): void {
+  writeRaw(kind, key, JSON.stringify(value));
+}
+
+/**
  * Per-tab identity for read-only link spectators.
  *
  * Watching a match must work without an account, and a viewer must never share an
@@ -24,15 +81,11 @@ export type AppTheme = 'light' | 'dark';
  * the seat stable across a refresh of the same tab while staying unique per tab.
  */
 export function getSpectatorId(): string {
-  try {
-    const existing = sessionStorage.getItem(STORAGE_KEYS.SPECTATOR_ID);
-    if (existing && /^spec_[a-z0-9]{6,}$/.test(existing)) return existing;
-    const minted = `spec_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`;
-    sessionStorage.setItem(STORAGE_KEYS.SPECTATOR_ID, minted);
-    return minted;
-  } catch {
-    return `spec_${Math.random().toString(36).slice(2, 14)}`;
-  }
+  const existing = readRaw('session', STORAGE_KEYS.SPECTATOR_ID);
+  if (existing && /^spec_[a-z0-9]{6,}$/.test(existing)) return existing;
+  const minted = `spec_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`;
+  writeRaw('session', STORAGE_KEYS.SPECTATOR_ID, minted);
+  return minted;
 }
 
 /**
@@ -40,30 +93,21 @@ export function getSpectatorId(): string {
  * or a mobile browser restore mid-match can resume instead of being stranded.
  */
 export function getActivePvpRoom(): string | null {
-  try {
-    return localStorage.getItem(STORAGE_KEYS.ACTIVE_PVP_ROOM);
-  } catch {
-    return null;
-  }
+  return readRaw('local', STORAGE_KEYS.ACTIVE_PVP_ROOM);
 }
 
 export function setActivePvpRoom(roomCode: string): void {
-  try {
-    localStorage.setItem(STORAGE_KEYS.ACTIVE_PVP_ROOM, roomCode.toUpperCase().trim());
-  } catch {}
+  writeRaw('local', STORAGE_KEYS.ACTIVE_PVP_ROOM, roomCode.toUpperCase().trim());
 }
 
 export function clearActivePvpRoom(): void {
-  try {
-    localStorage.removeItem(STORAGE_KEYS.ACTIVE_PVP_ROOM);
-  } catch {}
+  removeRaw('local', STORAGE_KEYS.ACTIVE_PVP_ROOM);
 }
 
 export interface PvpDraft {
   roomCode: string;
   segmentIndex: number;
   answer: string;
-  updatedAt: number;
 }
 
 /**
@@ -72,46 +116,30 @@ export interface PvpDraft {
  * restored into the textarea instead of vanishing.
  */
 export function getPvpDraft(): PvpDraft | null {
-  try {
-    const raw = sessionStorage.getItem(STORAGE_KEYS.PVP_DRAFT);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as PvpDraft;
-    if (!parsed || typeof parsed.answer !== 'string') return null;
-    return parsed;
-  } catch {
-    return null;
-  }
+  const parsed = readJson<PvpDraft | null>('session', STORAGE_KEYS.PVP_DRAFT, null);
+  if (!parsed || typeof parsed.answer !== 'string') return null;
+  return parsed;
 }
 
 export function setPvpDraft(draft: PvpDraft): void {
-  try {
-    sessionStorage.setItem(STORAGE_KEYS.PVP_DRAFT, JSON.stringify(draft));
-  } catch {}
+  writeJson('session', STORAGE_KEYS.PVP_DRAFT, draft);
 }
 
 export function clearPvpDraft(): void {
-  try {
-    sessionStorage.removeItem(STORAGE_KEYS.PVP_DRAFT);
-  } catch {}
+  removeRaw('session', STORAGE_KEYS.PVP_DRAFT);
 }
 
 export function getStoredDirection(): TranslationDirection {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEYS.DIRECTION);
-    return saved ? normalizeDirection(saved) : DEFAULT_DIRECTION;
-  } catch {
-    return DEFAULT_DIRECTION;
-  }
+  const saved = readRaw('local', STORAGE_KEYS.DIRECTION);
+  return saved ? normalizeDirection(saved) : DEFAULT_DIRECTION;
 }
 
 export function setStoredDirection(direction: TranslationDirection): void {
-  try {
-    localStorage.setItem(STORAGE_KEYS.DIRECTION, direction);
-  } catch {}
+  writeRaw('local', STORAGE_KEYS.DIRECTION, direction);
 }
 
 export function getStoredTheme(): AppTheme {
-  const saved = localStorage.getItem(STORAGE_KEYS.THEME);
+  const saved = readRaw('local', STORAGE_KEYS.THEME);
   if (saved === 'dark' || saved === 'light') {
     return saved;
   }
@@ -122,42 +150,31 @@ export function getStoredTheme(): AppTheme {
 }
 
 export function setStoredTheme(theme: AppTheme): void {
-  localStorage.setItem(STORAGE_KEYS.THEME, theme);
+  writeRaw('local', STORAGE_KEYS.THEME, theme);
   if (typeof document !== 'undefined') {
-    if (theme === 'dark') {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
+    document.documentElement.classList.toggle('dark', theme === 'dark');
   }
 }
 
-
 export function getAuthToken(): string | null {
-  return localStorage.getItem(STORAGE_KEYS.TOKEN);
+  return readRaw('local', STORAGE_KEYS.TOKEN);
 }
 
 export function setAuthToken(token: string): void {
-  localStorage.setItem(STORAGE_KEYS.TOKEN, token);
+  writeRaw('local', STORAGE_KEYS.TOKEN, token);
 }
 
 export function removeAuthToken(): void {
-  localStorage.removeItem(STORAGE_KEYS.TOKEN);
-  localStorage.removeItem(STORAGE_KEYS.USER);
+  removeRaw('local', STORAGE_KEYS.TOKEN);
+  removeRaw('local', STORAGE_KEYS.USER);
 }
 
 export function getStoredUser(): AuthUser | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEYS.USER);
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
+  return readJson<AuthUser | null>('local', STORAGE_KEYS.USER, null);
 }
 
 export function setStoredUser(user: AuthUser): void {
-  localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(user));
+  writeJson('local', STORAGE_KEYS.USER, user);
   if (user.nickname) {
     setPlayerNickname(user.nickname);
   }
@@ -166,49 +183,48 @@ export function setStoredUser(user: AuthUser): void {
 export function getPlayerNickname(): string {
   const user = getStoredUser();
   if (user?.nickname) return user.nickname;
-  return localStorage.getItem(STORAGE_KEYS.NICKNAME) || `研友${Math.floor(1000 + Math.random() * 9000)}`;
+  return readRaw('local', STORAGE_KEYS.NICKNAME) || `研友${Math.floor(1000 + Math.random() * 9000)}`;
 }
 
 export function setPlayerNickname(nickname: string): void {
-  localStorage.setItem(STORAGE_KEYS.NICKNAME, nickname.trim());
+  writeRaw('local', STORAGE_KEYS.NICKNAME, nickname.trim());
 }
 
 // Local cache fallback for history
 export function getLocalHistory(): HistorySessionRecord[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEYS.HISTORY);
-    if (!raw) return [];
-    return JSON.parse(raw);
-  } catch {
-    return [];
-  }
+  return readJson<HistorySessionRecord[]>('local', STORAGE_KEYS.HISTORY, []);
 }
 
 export function setLocalHistory(records: HistorySessionRecord[]): void {
-  try {
-    localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(records.slice(0, 50)));
-  } catch {}
-}
-
-export function getHistory(): HistorySessionRecord[] {
-  return getLocalHistory();
+  writeJson('local', STORAGE_KEYS.HISTORY, records.slice(0, 50));
 }
 
 export function saveHistoryRecord(record: HistorySessionRecord): void {
-  try {
-    const list = getLocalHistory();
-    const existingIdx = list.findIndex((r) => r.id === record.id);
-    if (existingIdx >= 0) {
-      list[existingIdx] = record;
-    } else {
-      list.unshift(record);
-    }
-    setLocalHistory(list);
-  } catch (err) {
-    console.error('Failed to save local history record:', err);
+  const list = getLocalHistory();
+  const existingIdx = list.findIndex((r) => r.id === record.id);
+  if (existingIdx >= 0) {
+    list[existingIdx] = record;
+  } else {
+    list.unshift(record);
   }
+  setLocalHistory(list);
+}
+
+/** Save locally and mirror the record to the account history endpoint. */
+export function persistHistoryRecord(record: HistorySessionRecord): void {
+  saveHistoryRecord(record);
+  const token = getAuthToken();
+  if (!token) return;
+  fetch('/api/history', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ record }),
+  }).catch((err) => console.error('Failed to post history to server:', err));
 }
 
 export function clearHistory(): void {
-  localStorage.removeItem(STORAGE_KEYS.HISTORY);
+  removeRaw('local', STORAGE_KEYS.HISTORY);
 }
