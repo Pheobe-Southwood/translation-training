@@ -1,13 +1,46 @@
 export type TranslationDirection = 'en-zh' | 'zh-en';
 
+/**
+ * Which question bank a paper belongs to.
+ *
+ * - `translation` — the original 2002–2026 英译汉/中译英 真题卷 (5 segments);
+ * - `cloze`       — 完型填空 文章里挑出的长难句 (3–5 segments, English→Chinese only);
+ * - `reading`     — 阅读理解 Text 1–4 里挑出的长难句 (3–5 segments, English→Chinese only).
+ *
+ * Only `translation` has a Chinese reference bank, so only it offers 中译英.
+ */
+export type ExamBank = 'translation' | 'cloze' | 'reading';
+
 export interface TranslationExam {
-  id: string; // e.g. "2024-translation"
-  year: number; // 2024
+  /**
+   * Canonical identifier, e.g. `2024-translation`, `2004-cloze`, `2004-reading-2`.
+   * A `year` alone is no longer unique: 2004 now has six papers.
+   */
+  examId: string;
+  /** Retained for older clients/records; always equal to `examId`. */
+  id: string;
+  bank: ExamBank;
+  /** Human label for the paper inside its bank, e.g. `完型填空`, `阅读理解 Text 2`. */
+  partLabel: string;
+  year: number; // 2004
   title: string;
-  maxScore: number; // 10
+  /** `translationSegments.length * 2` — 3 segments => 6, 5 segments => 10. */
+  maxScore: number;
   contentMarkdown: string; // Full passage markdown
-  translationSegments: string[]; // 5 sentences to translate
+  /** Target sentences: 5 for the translation bank, 3–5 for cloze/reading. */
+  translationSegments: string[];
   direction?: TranslationDirection;
+}
+
+/** One row of the paper picker on the homepage / PVP lobby. */
+export interface ExamCatalogEntry {
+  examId: string;
+  bank: ExamBank;
+  year: number;
+  partLabel: string;
+  title: string;
+  segmentCount: number;
+  maxScore: number;
 }
 
 export interface ScoringPointBreakdown {
@@ -74,6 +107,9 @@ export interface PlayerState {
 export interface PvpRoomSummary {
   roomCode: string;
   year: number;
+  examId: string;
+  bank: ExamBank;
+  partLabel: string;
   direction?: TranslationDirection;
   durationMinutes: number;
   status: RoomStatus;
@@ -85,6 +121,10 @@ export interface PvpRoomSummary {
 export interface PvpRoomState {
   roomCode: string;
   year: number;
+  /** Canonical paper id; `year` alone is ambiguous across banks. */
+  examId: string;
+  bank: ExamBank;
+  partLabel: string;
   direction: TranslationDirection;
   exam: TranslationExam;
   durationMinutes: number; // default 15
@@ -111,6 +151,10 @@ export interface HistorySessionRecord {
   id: string;
   type: 'solo' | 'pvp';
   year: number;
+  /** Canonical paper id; absent on records written before the passage banks existed. */
+  examId?: string;
+  bank?: ExamBank;
+  partLabel?: string;
   direction?: TranslationDirection;
   timestamp: number;
   totalScore: number;

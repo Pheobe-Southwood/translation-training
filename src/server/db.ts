@@ -3,6 +3,7 @@ import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
 import type { HistorySessionRecord, TranslationDirection } from '../shared/types.js';
 import { normalizeDirection } from '../shared/direction.js';
+import { describeExamId } from './examService.js';
 
 export interface UserRow {
   id: string;
@@ -19,6 +20,8 @@ export interface HistoryRow {
   user_id: string;
   type: 'solo' | 'pvp';
   year: number;
+  /** Canonical paper id (backfilled to `${year}-translation` for legacy rows). */
+  exam_id: string | null;
   direction: TranslationDirection;
   timestamp: number;
   total_score: number;
@@ -63,6 +66,7 @@ class AppDatabase {
         user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         type TEXT NOT NULL,
         year INTEGER NOT NULL,
+        exam_id TEXT,
         direction TEXT NOT NULL DEFAULT 'en-zh',
         timestamp INTEGER NOT NULL,
         total_score REAL NOT NULL,
@@ -93,6 +97,24 @@ class AppDatabase {
         "ALTER TABLE history_records ADD COLUMN direction TEXT NOT NULL DEFAULT 'en-zh'"
       );
       console.log('[db] Added history_records.direction (default en-zh)');
+    }
+
+    // Additive migration for databases created before examId (`year` alone stopped
+    // being unique once several banks share a year). Idempotent: the ALTER only
+    // runs when the column is missing, the backfill only touches NULL/blank rows.
+    if (!columns.some((column) => column.name === 'exam_id')) {
+      this.db.exec('ALTER TABLE history_records ADD COLUMN exam_id TEXT');
+      console.log('[db] Added history_records.exam_id');
+    }
+    const backfill = this.db
+      .prepare(
+        "UPDATE history_records SET exam_id = CAST(year AS TEXT) || '-translation' " +
+          "WHERE exam_id IS NULL OR exam_id = ''"
+      )
+      .run();
+    const backfilled = Number(backfill.changes || 0);
+    if (backfilled > 0) {
+      console.log(`[db] Backfilled exam_id for ${backfilled} legacy history record(s)`);
     }
   }
 
@@ -192,19 +214,26 @@ class AppDatabase {
     const pvpDetailsJson = record.pvpDetails ? JSON.stringify(record.pvpDetails) : null;
     const now = record.timestamp || Date.now();
     const direction = normalizeDirection(record.direction);
+    // Records written before examId existed (or by an old client) belong to the
+    // translation bank of their year.
+    const examId =
+      typeof record.examId === 'string' && record.examId.trim()
+        ? record.examId.trim()
+        : `${record.year}-translation`;
 
     // Defense-in-depth: Check for duplicate/prior submissions within a window (e.g. 120s)
     // or by matching record id, to update in place and prevent duplicate inserts.
+    // examId (not year) identifies the paper now that a year holds several papers.
     const dupCheckStmt = this.db.prepare(`
       SELECT id FROM history_records
-      WHERE user_id = ? AND type = ? AND year = ? AND direction = ?
+      WHERE user_id = ? AND type = ? AND exam_id = ? AND direction = ?
         AND (id = ? OR abs(timestamp - ?) < 120000)
       LIMIT 1
     `);
     const existing = dupCheckStmt.get(
       userId,
       record.type,
-      record.year,
+      examId,
       direction,
       record.id,
       now
@@ -214,8 +243,8 @@ class AppDatabase {
 
     const stmt = this.db.prepare(`
       INSERT INTO history_records (
-        id, user_id, type, year, direction, timestamp, total_score, time_spent_seconds, submissions_json, pvp_details_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, user_id, type, year, exam_id, direction, timestamp, total_score, time_spent_seconds, submissions_json, pvp_details_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         total_score = excluded.total_score,
         submissions_json = excluded.submissions_json,
@@ -227,6 +256,7 @@ class AppDatabase {
       userId,
       record.type,
       record.year,
+      examId,
       direction,
       now,
       record.totalScore,
@@ -244,17 +274,26 @@ class AppDatabase {
       LIMIT ?
     `);
     const rows = stmt.all(userId, limit) as unknown as HistoryRow[];
-    return rows.map((r) => ({
-      id: r.id,
-      type: r.type,
-      year: r.year,
-      direction: normalizeDirection(r.direction),
-      timestamp: r.timestamp,
-      totalScore: r.total_score,
-      timeSpentSeconds: r.time_spent_seconds,
-      submissions: JSON.parse(r.submissions_json || '[]'),
-      pvpDetails: r.pvp_details_json ? JSON.parse(r.pvp_details_json) : undefined,
-    }));
+    return rows.map((r): HistorySessionRecord => {
+      const examId = r.exam_id || `${r.year}-translation`;
+      // bank/partLabel are derived from the paper catalogue so old rows (and the
+      // pre-examId schema) still render a readable paper label.
+      const descriptor = describeExamId(examId);
+      return {
+        id: r.id,
+        type: r.type,
+        year: r.year,
+        examId,
+        bank: descriptor?.bank,
+        partLabel: descriptor?.partLabel,
+        direction: normalizeDirection(r.direction),
+        timestamp: r.timestamp,
+        totalScore: r.total_score,
+        timeSpentSeconds: r.time_spent_seconds,
+        submissions: JSON.parse(r.submissions_json || '[]'),
+        pvpDetails: r.pvp_details_json ? JSON.parse(r.pvp_details_json) : undefined,
+      };
+    });
   }
 
   public clearUserHistory(userId: string): void {

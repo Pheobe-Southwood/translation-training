@@ -15,10 +15,18 @@ import {
   verifySpectateTicket,
 } from './auth.js';
 import { db } from './db.js';
-import { getExamByYear, getExamYears, getGradingMaterial, getRandomExam } from './examService.js';
+import {
+  getExamById,
+  getExamCatalog,
+  getExamYears,
+  getGradingMaterial,
+  getRandomExam,
+  parseExamBank,
+} from './examService.js';
 import { gradeTranslation } from './deepseek.js';
 import { pvpManager } from './pvpManager.js';
 import { DEFAULT_DIRECTION, parseDirection } from '../shared/direction.js';
+import type { ExamBank } from '../shared/types.js';
 import { checkNickname } from './moderation.js';
 import { SlidingWindowLimiter, clientIp, auditLog } from './rateLimit.js';
 
@@ -53,6 +61,20 @@ const loginAccountLimiter = new SlidingWindowLimiter(5, 10 * 60 * 1000);
 const registerLimiter = new SlidingWindowLimiter(5, 60 * 60 * 1000);
 const gradeLimiter = new SlidingWindowLimiter(30, 10 * 60 * 1000);
 const nicknameLimiter = new SlidingWindowLimiter(10, 60 * 60 * 1000);
+
+/**
+ * Parse `?bank=` for the exam catalogue endpoints. Defaults to the translation
+ * bank, so old clients that never send it keep listing the 2002–2026 papers.
+ */
+function parseBankQuery(query: unknown): { bank: ExamBank } | { error: string } {
+  const raw = (query as Record<string, unknown> | undefined)?.bank;
+  if (raw === undefined || raw === null || raw === '') return { bank: 'translation' };
+  const bank = parseExamBank(raw);
+  if (!bank) {
+    return { error: '无效的题库类型，仅支持 translation / cloze / reading' };
+  }
+  return { bank };
+}
 
 const escapeHtml = (value: string): string =>
   value.replace(/[&<>"']/g, (char) =>
@@ -534,8 +556,17 @@ async function main() {
   });
 
   // --- Exam APIs ---
-  app.get('/api/exams/years', async () => {
-    return { years: getExamYears() };
+  app.get('/api/exams/years', async (req, reply) => {
+    const bankQuery = parseBankQuery(req.query);
+    if ('error' in bankQuery) return reply.status(400).send({ error: bankQuery.error });
+    return { years: getExamYears(bankQuery.bank) };
+  });
+
+  /** One row per paper in the requested bank, for the paper picker. */
+  app.get('/api/exams/catalog', async (req, reply) => {
+    const bankQuery = parseBankQuery(req.query);
+    if ('error' in bankQuery) return reply.status(400).send({ error: bankQuery.error });
+    return { exams: getExamCatalog(bankQuery.bank) };
   });
 
   app.get('/api/exams/random', async (req, reply) => {
@@ -544,25 +575,30 @@ async function main() {
     if (!direction) {
       return reply.status(400).send({ error: '无效的翻译方向，仅支持 en-zh 或 zh-en' });
     }
+    const bankQuery = parseBankQuery(req.query);
+    if ('error' in bankQuery) return reply.status(400).send({ error: bankQuery.error });
     try {
-      const exam = getRandomExam(direction);
+      const exam = getRandomExam(direction, bankQuery.bank);
       return { exam };
     } catch (err: any) {
       return reply.status(404).send({ error: err.message || '题库暂不可用' });
     }
   });
 
-  app.get('/api/exams/:year', async (req, reply) => {
-    const params = req.params as { year: string };
-    const year = parseInt(params.year, 10);
+  /**
+   * Canonical paper lookup. A bare year stays valid and maps to
+   * `${year}-translation`, so old links and older clients never 404.
+   */
+  app.get('/api/exams/:examId', async (req, reply) => {
+    const params = req.params as { examId: string };
     const rawDirection = (req.query as any)?.direction;
     const direction = rawDirection === undefined ? DEFAULT_DIRECTION : parseDirection(rawDirection);
     if (!direction) {
       return reply.status(400).send({ error: '无效的翻译方向，仅支持 en-zh 或 zh-en' });
     }
-    const exam = getExamByYear(year, direction);
+    const exam = getExamById(params.examId, direction);
     if (!exam) {
-      return reply.status(404).send({ error: `未找到 ${year} 年真题（${direction}）` });
+      return reply.status(404).send({ error: `未找到 ${params.examId}（${direction}）` });
     }
     return { exam };
   });
@@ -571,6 +607,11 @@ async function main() {
   app.post('/api/solo/grade', async (req, reply) => {
     const body = (req.body as any) || {};
     const { fullArticle, targetSentence, studentAnswer, segmentIndex, year } = body;
+    // New payloads carry `examId`; legacy payloads carry `year` (translation bank).
+    const requestedExamId =
+      typeof body.examId === 'string' && body.examId.trim() ? body.examId.trim() : undefined;
+    const structuredExamId: string | number | undefined =
+      requestedExamId ?? (Number.isInteger(year) ? Number(year) : undefined);
     const rawDirection = body.direction;
     const direction =
       rawDirection === undefined ? DEFAULT_DIRECTION : parseDirection(rawDirection);
@@ -579,14 +620,16 @@ async function main() {
       return reply.status(400).send({ error: '无效的翻译方向，仅支持 en-zh 或 zh-en' });
     }
 
-    const hasStructuredExam = Number.isInteger(year) && Number.isInteger(segmentIndex);
+    const hasStructuredExam = structuredExamId !== undefined && Number.isInteger(segmentIndex);
     let material: { sourceText: string; referenceAnswer: string; fullSource: string } | undefined;
     let gradingDirection = direction;
 
     if (hasStructuredExam) {
-      material = getGradingMaterial(year, direction, segmentIndex);
+      material = getGradingMaterial(structuredExamId, direction, segmentIndex);
       if (!material) {
-        return reply.status(404).send({ error: `未找到 ${year} 年第 ${segmentIndex + 1} 题的材料` });
+        return reply
+          .status(404)
+          .send({ error: `未找到 ${structuredExamId} 第 ${segmentIndex + 1} 题的材料` });
       }
     } else if (direction === 'en-zh' && targetSentence) {
       // Backward-compatible English→Chinese payload used by older clients.
@@ -599,7 +642,7 @@ async function main() {
     } else {
       return reply.status(400).send({
         error: direction === 'zh-en'
-          ? '中译英评分需要 year 和 segmentIndex'
+          ? '中译英评分需要 examId（或 year）和 segmentIndex'
           : 'Missing targetSentence',
       });
     }

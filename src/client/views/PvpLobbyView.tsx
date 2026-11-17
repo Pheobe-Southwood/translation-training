@@ -15,14 +15,32 @@ import {
   Crown,
   X,
 } from 'lucide-react';
-import type { PvpRoomState, TranslationDirection } from '../../shared/types.js';
+import type {
+  ExamBank,
+  ExamCatalogEntry,
+  PvpRoomState,
+  TranslationDirection,
+} from '../../shared/types.js';
 import { directionLabel, directionShort } from '../../shared/direction.js';
 import { PvpSocket, type PvpConnectionStatus } from '../utils/pvpSocket.js';
-import { clearActivePvpRoom, getAuthToken, setActivePvpRoom } from '../utils/storage.js';
+import { clearActivePvpRoom, setActivePvpRoom } from '../utils/storage.js';
 import { copyTextToClipboard } from '../utils/clipboard.js';
+import {
+  EXAM_BANKS,
+  EXAM_BANK_META,
+  entriesForYear,
+  fetchAllExamCatalogs,
+  inferBankFromExamId,
+  isEnZhOnlyBank,
+  paperSummary,
+  resolveInitialSelection,
+  uniqueYears,
+  unitLabel,
+} from '../utils/exams.js';
 
 interface PvpLobbyViewProps {
-  initialYear: number;
+  /** Canonical paper id selected on the homepage, e.g. `2004-reading-2`. */
+  initialExamId?: string;
   initialDirection?: TranslationDirection;
   onDirectionChange?: (direction: TranslationDirection) => void;
   playerId: string;
@@ -38,7 +56,7 @@ interface PvpLobbyViewProps {
 }
 
 export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
-  initialYear,
+  initialExamId,
   initialDirection = 'en-zh',
   onDirectionChange,
   playerId,
@@ -53,12 +71,19 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
 }) => {
   const [mode, setMode] = useState<'create' | 'join'>(initialRoomCode ? 'join' : 'create');
   const [roomCodeInput, setRoomCodeInput] = useState(initialRoomCode || '');
-  const [selectedYear, setSelectedYear] = useState<number>(initialYear);
+  const [bank, setBank] = useState<ExamBank>(() => inferBankFromExamId(initialExamId));
+  const [selectedYear, setSelectedYear] = useState<number | null>(null);
+  const [selectedUnitId, setSelectedUnitId] = useState<string | null>(null);
+  const [catalogs, setCatalogs] = useState<Record<ExamBank, ExamCatalogEntry[]>>({
+    translation: [],
+    cloze: [],
+    reading: [],
+  });
+  const [catalogLoading, setCatalogLoading] = useState(false);
   const [direction, setDirection] = useState<TranslationDirection>(initialDirection);
   const [durationMinutes, setDurationMinutes] = useState<number>(15);
   const [maxPlayers, setMaxPlayers] = useState<number>(2);
   const [allowSpectators, setAllowSpectators] = useState<boolean>(true);
-  const [years, setYears] = useState<number[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [spectatorNotice, setSpectatorNotice] = useState<string | null>(null);
@@ -106,9 +131,24 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
   useEffect(() => {
     // A read-only viewer never needs the exam list (and has no credentials for it).
     if (isSpectateLinkViewer || isMissingSpectateTicket) return;
-    fetchYears();
+    let cancelled = false;
+    setCatalogLoading(true);
+    fetchAllExamCatalogs().then((loaded) => {
+      if (cancelled) return;
+      setCatalogs(loaded);
+      const selection = resolveInitialSelection(loaded, initialExamId);
+      if (selection) {
+        setBank(selection.bank);
+        setSelectedYear(selection.year);
+        setSelectedUnitId(selection.examId);
+      }
+      setCatalogLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isSpectateLinkViewer, isMissingSpectateTicket]);
+  }, [isSpectateLinkViewer, isMissingSpectateTicket, initialExamId]);
 
   // Own the resilient websocket. It survives the hand-off to the live match view
   // (handedOffRef), and is closed when the player leaves the lobby for good.
@@ -205,22 +245,36 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialRoomCode, autoJoin, initialSpectate, spectateTicket]);
 
-  const fetchYears = async () => {
-    try {
-      const token = getAuthToken();
-      const res = await fetch('/api/exams/years', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setYears(data.years || []);
-      }
-    } catch (err) {
-      console.error(err);
-    }
+  // --- Paper picker state (three banks, 3–5 sentences per paper) ---
+  const bankEntries = catalogs[bank];
+  const years = uniqueYears(bankEntries);
+  const unitEntries = entriesForYear(bankEntries, selectedYear);
+  const selectedEntry =
+    unitEntries.find((entry) => entry.examId === selectedUnitId) || unitEntries[0] || null;
+  const enZhOnly = isEnZhOnlyBank(bank);
+  /** Cloze/reading only ship English→Chinese, so the lobby locks the direction. */
+  const effectiveDirection: TranslationDirection = enZhOnly ? 'en-zh' : direction;
+
+  const handleBankSelect = (nextBank: ExamBank) => {
+    setBank(nextBank);
+    const nextEntries = catalogs[nextBank];
+    const nextYears = uniqueYears(nextEntries);
+    const nextYear =
+      selectedYear !== null && nextYears.includes(selectedYear) ? selectedYear : nextYears[0] ?? null;
+    setSelectedYear(nextYear);
+    setSelectedUnitId(entriesForYear(nextEntries, nextYear)[0]?.examId ?? null);
+  };
+
+  const handleYearSelect = (year: number) => {
+    setSelectedYear(year);
+    setSelectedUnitId(entriesForYear(bankEntries, year)[0]?.examId ?? null);
   };
 
   const handleCreateRoom = () => {
+    if (!selectedEntry) {
+      setError('题库加载中，请稍后重试');
+      return;
+    }
     setError(null);
     setSpectatorNotice(null);
     setLoading(true);
@@ -233,11 +287,11 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
       type: 'room:create',
       payload: {
         nickname,
-        year: selectedYear,
+        examId: selectedEntry.examId,
+        direction: effectiveDirection,
         durationMinutes,
         maxPlayers,
         allowSpectators,
-        direction,
       },
     });
   };
@@ -300,6 +354,8 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
   };
 
   const handleHostChangeDirection = (next: TranslationDirection) => {
+    // Passage banks have no Chinese reference bank: direction stays en-zh.
+    if (isEnZhOnlyBank(currentRoom?.bank || 'translation')) return;
     setError(null);
     setDirection(next);
     onDirectionChange?.(next);
@@ -320,7 +376,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
       try {
         await navigator.share({
           title: '考研英语翻译竞技场对战邀请',
-          text: `我在考研英语（一）翻译竞技场创建了 ${currentRoom.year} 年真题（${directionLabel(currentRoom.direction)}）${currentRoom.maxPlayers} 人房间，房间码：${currentRoom.roomCode}，来决一胜负吧！`,
+          text: `我在考研英语翻译竞技场创建了 ${currentRoom.year} 年${currentRoom.partLabel || '翻译'}（${directionLabel(currentRoom.direction)}）${currentRoom.maxPlayers} 人房间，房间码：${currentRoom.roomCode}，来决一胜负吧！`,
           url,
         });
         return;
@@ -480,6 +536,11 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
     /** Link viewers are strictly read-only: no player actions are offered at all. */
     const readOnlyViewer = isSpectateLinkViewer;
     const roomMaxPlayers = currentRoom.maxPlayers || 2;
+    const roomBank = currentRoom.bank || 'translation';
+    const roomPartLabel = currentRoom.partLabel || '翻译';
+    const roomSegmentCount = currentRoom.exam?.translationSegments?.length || 5;
+    const roomMaxScore = currentRoom.exam?.maxScore || roomSegmentCount * 2;
+    const roomEnZhOnly = isEnZhOnlyBank(roomBank);
     const inviteUrl = `${window.location.origin}/#/pvp/${currentRoom.roomCode}`;
     const spectateUrl = currentRoom.spectateTicket
       ? `${window.location.origin}/#/pvp/${currentRoom.roomCode}?spectate=1&t=${encodeURIComponent(
@@ -574,6 +635,9 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
                 </span>
                 <span className="bg-swiss-red text-white font-mono text-[10px] font-black px-2 py-0.5 uppercase">
                   {directionShort(currentRoom.direction)} · {directionLabel(currentRoom.direction)}
+                </span>
+                <span className="bg-swiss-black dark:bg-zinc-100 text-white dark:text-swiss-black font-mono text-[10px] font-black px-2 py-0.5 uppercase">
+                  {EXAM_BANK_META[roomBank].label}
                 </span>
                 {isMeSpectator && (
                   <span className="bg-blue-600 text-white font-mono text-[10px] font-bold px-2 py-0.5 uppercase flex items-center gap-1">
@@ -685,7 +749,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
             )}
           </div>
 
-          {/* Translation direction strip */}
+          {/* Translation direction strip: passage banks always run English→Chinese */}
           <div className="mt-4 p-3 border-2 border-swiss-black dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/80 flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2 font-mono">
               <span className="text-[10px] font-bold uppercase text-zinc-500 dark:text-zinc-400">
@@ -693,8 +757,11 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
               </span>
               <span className="text-sm font-black text-swiss-red">{directionShort(currentRoom.direction)}</span>
               <span className="text-xs font-bold text-swiss-black dark:text-zinc-100">{directionLabel(currentRoom.direction)}</span>
+              {roomEnZhOnly && (
+                <span className="text-[10px] font-bold text-zinc-500 dark:text-zinc-400">（本题库锁定英译中）</span>
+              )}
             </div>
-            {myPlayer?.isHost && currentRoom.status === 'WAITING' && !readOnlyViewer ? (
+            {!roomEnZhOnly && myPlayer?.isHost && currentRoom.status === 'WAITING' && !readOnlyViewer ? (
               <div className="flex items-center gap-1.5">
                 {(['en-zh', 'zh-en'] as TranslationDirection[]).map((d) => (
                   <button
@@ -713,7 +780,8 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
               </div>
             ) : (
               <span className="font-mono text-[10px] text-zinc-500 dark:text-zinc-400">
-                题干：{currentRoom.direction === 'zh-en' ? '中文标准译文' : '英文真题原句'} · 答案：{currentRoom.direction === 'zh-en' ? '英文原句' : '中文译文'}
+                题干：{currentRoom.direction === 'zh-en' ? '中文标准译文' : '英文原句'} · 答案：
+                {currentRoom.direction === 'zh-en' ? '英文原句' : '中文译文'}
               </span>
             )}
           </div>
@@ -722,10 +790,13 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-3.5 py-4 border-b border-zinc-200 dark:border-zinc-800 font-mono text-xs mt-3">
             <div className="p-3 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700">
               <div className="text-zinc-500 dark:text-zinc-400 text-[10px] uppercase font-bold mb-1 flex items-center gap-1">
-                <Calendar className="w-3.5 h-3.5" /> 考研年份
+                <Calendar className="w-3.5 h-3.5" /> 试卷单元
               </div>
               <div className="font-black text-sm text-swiss-black dark:text-zinc-100">
-                {currentRoom.year} 年真题
+                {currentRoom.year} 年 · {roomPartLabel}
+              </div>
+              <div className="font-mono text-[10px] text-zinc-500 dark:text-zinc-400 mt-0.5">
+                {roomSegmentCount} 句 · 满分 {roomMaxScore.toFixed(1)} 分
               </div>
             </div>
             <div className="p-3 bg-zinc-50 dark:bg-zinc-800/80 border border-zinc-200 dark:border-zinc-700">
@@ -985,7 +1056,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
           className="flex items-center gap-1.5 px-3 py-1.5 border border-zinc-300 dark:border-zinc-700 hover:border-swiss-black dark:hover:border-zinc-400 font-mono text-xs font-bold transition-colors bg-white dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200"
         >
           <ArrowLeft className="w-3.5 h-3.5" />
-          返回真题首页
+          返回题库首页
         </button>
         <div className="border-2 sm:border-4 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-900 p-6 sm:p-8 shadow-[6px_6px_0px_0px_#09090b] dark:shadow-[6px_6px_0px_0px_#000000] space-y-4 text-center">
           <div className="w-12 h-12 bg-swiss-red text-white flex items-center justify-center mx-auto">
@@ -1011,7 +1082,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
         className="flex items-center gap-1.5 px-3 py-1.5 border border-zinc-300 dark:border-zinc-700 hover:border-swiss-black dark:hover:border-zinc-400 font-mono text-xs font-bold transition-colors bg-white dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200"
       >
         <ArrowLeft className="w-3.5 h-3.5" />
-        返回真题首页
+        返回题库首页
       </button>
 
       <div className="border-2 sm:border-4 border-swiss-black dark:border-zinc-700 bg-white dark:bg-zinc-900 p-5 sm:p-8 shadow-[6px_6px_0px_0px_#09090b] dark:shadow-[6px_6px_0px_0px_#000000] space-y-5 sm:space-y-6">
@@ -1068,47 +1139,129 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
         {mode === 'create' ? (
           /* Create Room Form */
           <div className="space-y-4 sm:space-y-5">
+            {/* Question bank: translation / cloze / reading */}
             <div>
               <label className="block text-xs font-mono font-bold uppercase mb-1.5 text-zinc-700 dark:text-zinc-300">
-                翻译方向 (TRANSLATION DIRECTION)
+                题库选择 (QUESTION BANK)
               </label>
-              <div className="grid grid-cols-2 gap-2.5 sm:gap-3">
-                {(['en-zh', 'zh-en'] as TranslationDirection[]).map((d) => (
+              <div className="grid grid-cols-3 gap-2 sm:gap-2.5 font-mono text-xs font-bold">
+                {EXAM_BANKS.map((itemBank) => (
                   <button
-                    key={d}
+                    key={itemBank}
                     type="button"
-                    onClick={() => handleDirectionSelect(d)}
-                    className={`py-3 px-3 border-2 text-left transition-all active:scale-[0.98] ${
-                      direction === d
+                    onClick={() => handleBankSelect(itemBank)}
+                    className={`py-2.5 px-2 border-2 text-left transition-all active:scale-[0.98] ${
+                      bank === itemBank
                         ? 'border-swiss-red bg-swiss-black text-white dark:bg-zinc-100 dark:text-swiss-black'
                         : 'border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 hover:border-swiss-black'
                     }`}
                   >
-                    <span className="font-mono text-sm font-black">{directionShort(d)}</span>
-                    <span className="block text-[10px] font-mono mt-0.5 opacity-70">{directionLabel(d)}</span>
+                    <span className="block text-[11px] font-black">{EXAM_BANK_META[itemBank].label}</span>
+                    <span className="block text-[9px] mt-0.5 opacity-70 font-normal">
+                      {isEnZhOnlyBank(itemBank) ? '仅英译中' : '英译中 + 中译英'}
+                    </span>
                   </button>
                 ))}
-              </div>
-              <div className="mt-1.5 font-mono text-[10px] text-zinc-500 dark:text-zinc-400">
-                中译英题干来自网络公开中文标准译文，英文原句为标准答案。
               </div>
             </div>
 
             <div>
               <label className="block text-xs font-mono font-bold uppercase mb-1.5 text-zinc-700 dark:text-zinc-300">
-                选择对战真题年份
+                {enZhOnly ? '选择文章年份' : '选择对战真题年份'}
               </label>
               <select
-                value={selectedYear}
-                onChange={(e) => setSelectedYear(parseInt(e.target.value, 10))}
-                className="w-full border-2 border-swiss-black dark:border-zinc-700 px-3.5 py-2.5 font-mono text-sm bg-white dark:bg-zinc-800 text-swiss-black dark:text-zinc-100 focus:outline-none"
+                value={selectedYear ?? ''}
+                onChange={(e) => handleYearSelect(parseInt(e.target.value, 10))}
+                disabled={years.length === 0}
+                className="w-full border-2 border-swiss-black dark:border-zinc-700 px-3.5 py-2.5 font-mono text-sm bg-white dark:bg-zinc-800 text-swiss-black dark:text-zinc-100 focus:outline-none disabled:opacity-50"
               >
+                {years.length === 0 && (
+                  <option value="">{catalogLoading ? '题库加载中...' : '暂无可对战试卷'}</option>
+                )}
                 {years.map((y) => (
                   <option key={y} value={y}>
-                    {y} 年考研英语一翻译真题
+                    {y} 年{enZhOnly ? EXAM_BANK_META[bank].label : '考研英语一翻译真题'}
                   </option>
                 ))}
               </select>
+            </div>
+
+            {/* Unit picker: cloze is one passage per year, reading has Text 1–4 */}
+            {enZhOnly && unitEntries.length > 0 && (
+              <div>
+                <label className="block text-xs font-mono font-bold uppercase mb-1.5 text-zinc-700 dark:text-zinc-300">
+                  {bank === 'cloze' ? '单元选择 (PASSAGE)' : '阅读单元选择 (TEXT)'}
+                </label>
+                <div
+                  className={`grid gap-2 font-mono text-xs font-bold ${
+                    unitEntries.length > 1 ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-1'
+                  }`}
+                >
+                  {unitEntries.map((entry) => (
+                    <button
+                      key={entry.examId}
+                      type="button"
+                      onClick={() => setSelectedUnitId(entry.examId)}
+                      className={`py-2 px-2 border-2 text-center transition-all active:scale-[0.98] ${
+                        selectedEntry?.examId === entry.examId
+                          ? 'border-swiss-red bg-rose-50 dark:bg-rose-950/40 text-swiss-red dark:text-rose-400'
+                          : 'border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 hover:border-swiss-black dark:hover:border-zinc-500'
+                      }`}
+                    >
+                      <span className="block text-sm font-black">{unitLabel(entry)}</span>
+                      <span className="block text-[10px] text-zinc-400 dark:text-zinc-500 mt-0.5 font-normal">
+                        {entry.segmentCount} 句 · {entry.maxScore.toFixed(1)} 分
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Translation direction: hidden and locked to en-zh for passage banks */}
+            {!enZhOnly ? (
+              <div>
+                <label className="block text-xs font-mono font-bold uppercase mb-1.5 text-zinc-700 dark:text-zinc-300">
+                  翻译方向 (TRANSLATION DIRECTION)
+                </label>
+                <div className="grid grid-cols-2 gap-2.5 sm:gap-3">
+                  {(['en-zh', 'zh-en'] as TranslationDirection[]).map((d) => (
+                    <button
+                      key={d}
+                      type="button"
+                      onClick={() => handleDirectionSelect(d)}
+                      className={`py-3 px-3 border-2 text-left transition-all active:scale-[0.98] ${
+                        direction === d
+                          ? 'border-swiss-red bg-swiss-black text-white dark:bg-zinc-100 dark:text-swiss-black'
+                          : 'border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 hover:border-swiss-black'
+                      }`}
+                    >
+                      <span className="font-mono text-sm font-black">{directionShort(d)}</span>
+                      <span className="block text-[10px] font-mono mt-0.5 opacity-70">{directionLabel(d)}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="mt-1.5 font-mono text-[10px] text-zinc-500 dark:text-zinc-400">
+                  中译英题干来自网络公开中文标准译文，英文原句为标准答案。
+                </div>
+              </div>
+            ) : (
+              <div className="p-3 border-2 border-swiss-black dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/80 font-mono text-[11px] text-zinc-600 dark:text-zinc-400 flex flex-wrap items-center justify-between gap-2">
+                <span>本题库无中文参考译文，仅支持英译中，方向已锁定。</span>
+                <span className="bg-swiss-black dark:bg-zinc-100 text-white dark:text-swiss-black font-black px-2 py-0.5">
+                  EN → 中
+                </span>
+              </div>
+            )}
+
+            {/* Selected paper summary */}
+            <div className="p-2.5 bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200 dark:border-zinc-700 font-mono text-[11px] text-zinc-600 dark:text-zinc-400">
+              <span className="font-bold text-zinc-700 dark:text-zinc-200 mr-1">已选试卷：</span>
+              {selectedEntry
+                ? paperSummary(selectedEntry, effectiveDirection)
+                : catalogLoading
+                ? '题库加载中...'
+                : '暂无可对战试卷'}
             </div>
 
             {/* Max Players Selector: 2 / 3 / 4 */}
@@ -1198,7 +1351,7 @@ export const PvpLobbyView: React.FC<PvpLobbyViewProps> = ({
 
             <button
               onClick={handleCreateRoom}
-              disabled={loading}
+              disabled={loading || !selectedEntry}
               className="w-full min-h-[48px] py-3.5 bg-swiss-red hover:bg-swiss-red-dark text-white font-mono text-xs font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-2 disabled:opacity-50 active:scale-[0.99]"
             >
               {loading ? (
