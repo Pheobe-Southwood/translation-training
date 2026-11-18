@@ -22,6 +22,26 @@ const PATTERNS = [
 /** Files we never want to flag (this guard itself documents the patterns). */
 const ALLOWLIST = new Set(['scripts/check-secrets.mjs']);
 
+/**
+ * A public IPv4 address in a public repo usually means a server/host detail leaked
+ * into docs or config. Loopback, wildcard, RFC 1918 private ranges, link-local,
+ * multicast and RFC 5737 documentation ranges are deliberately not flagged.
+ */
+const IPV4 = /(?<![\d.])((?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d))(?![\d.])/g;
+
+function isPublicIp(ip) {
+  const [a, b, c] = ip.split('.').map(Number);
+  if (a === 0 || a === 10 || a === 127) return false;
+  if (a === 169 && b === 254) return false;
+  if (a === 172 && b >= 16 && b <= 31) return false;
+  if (a === 192 && b === 168) return false;
+  if (a === 192 && b === 0 && c === 2) return false;
+  if (a === 198 && b === 51 && c === 100) return false;
+  if (a === 203 && b === 0 && c === 113) return false;
+  if (a >= 224) return false;
+  return true;
+}
+
 function trackedFiles() {
   try {
     return execFileSync('git', ['ls-files'], { encoding: 'utf8' })
@@ -61,6 +81,13 @@ function scan(files, { relative }) {
         const line = text.slice(0, match.index).split('\n').length;
         hits.push({ rel, line, name, sample: `${match[0].slice(0, 6)}…(${match[0].length} chars)` });
       }
+    }
+    IPV4.lastIndex = 0;
+    for (const match of text.matchAll(IPV4)) {
+      const ip = match[1];
+      if (!isPublicIp(ip)) continue;
+      const line = text.slice(0, match.index).split('\n').length;
+      hits.push({ rel, line, name: 'Public IPv4 address', sample: ip });
     }
   }
   return hits;
